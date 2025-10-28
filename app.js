@@ -42,6 +42,7 @@
 
   const srcName = $('srcName'), srcUrl = $('srcUrl'), srcKeyCol = $('srcKeyCol');
   const addSource = $('addSource'), activeSource = $('activeSource');
+  const btnRemoveSource = $('btnRemoveSource');
   const lookupVal = $('lookupVal'), btnSearch = $('btnSearch'), btnReloadCsv = $('btnReloadCsv');
   const rowsList = $('rowsList');
 
@@ -258,19 +259,38 @@
   }
 
   if (addSource) {
-    addSource.addEventListener('click', async ()=>{
-      const name = (srcName?.value||'').trim();
-      const url = (srcUrl?.value||'').trim();
-      const keyCol = (srcKeyCol?.value||'').trim();
-      if(!name || !url){ err('Enter a tab name and CSV URL.'); return; }
-      const s = { id:uid(), name, url, keyCol:keyCol||null, headers:null, rows:null };
+    addSource && addSource.addEventListener('click', async ()=>{
+      const name  = (srcName?.value || '').trim();
+      const url   = (srcUrl?.value  || '').trim();
+      const keyCol= (srcKeyCol?.value || '').trim();
+      if (!name || !url) { err('Enter a tab name and CSV URL.'); return; }
+    
+      // If a source with the same URL exists, update it instead of duplicating
+      const existing = sources.find(x => x.url === url);
+      if (existing) {
+        existing.name = name;
+        if (keyCol) existing.keyCol = keyCol;
+        try {
+          await loadSourceData(existing); // refresh headers/rows
+          activeSourceId = existing.id;
+          renderSourcesDropdown(); renderRowsList(); renderMappingTable();
+          ok('Updated existing source.');
+        } catch (e) {
+          err(e.message || 'Failed to refresh the existing source.');
+        }
+        return;
+      }
+    
+      // Otherwise create a new source
+      const s = { id: uid(), name, url, keyCol: keyCol || null, headers: null, rows: null };
       sources.push(s); saveSources();
-      try{
+      try {
         await loadSourceData(s);
-        activeSourceId = s.id; renderSourcesDropdown(); renderRowsList(); renderMappingTable();
+        activeSourceId = s.id;
+        renderSourcesDropdown(); renderRowsList(); renderMappingTable();
         ok('Source added.');
-      }catch(e){
-        err(e.message||'Failed to load CSV.');
+      } catch (e) {
+        err(e.message || 'Failed to load CSV.');
       }
     });
   }
@@ -284,6 +304,35 @@
   });
 
   btnSearch && btnSearch.addEventListener('click', ()=> renderRowsList());
+
+  btnRemoveSource && btnRemoveSource.addEventListener('click', ()=>{
+    const s = getSource(activeSourceId);
+    if (!s) { err('No source selected.'); return; }
+    if (!confirm(`Remove source "${s.name}"? This will also clear any field mappings that use it.`)) return;
+  
+    // 1) remove from sources
+    sources = sources.filter(x => x.id !== s.id);
+  
+    // 2) clear mappings that referenced this source
+    Object.keys(mapping).forEach(qid => {
+      if (mapping[qid]?.sourceId === s.id) delete mapping[qid];
+    });
+  
+    // 3) clear selected row if it came from this source
+    if (selectedRow?.__sourceId === s.id) selectedRow = null;
+  
+    // 4) pick a new active source (if any)
+    activeSourceId = sources[0]?.id || null;
+  
+    // 5) persist + repaint
+    saveSources();
+    saveMapping();
+    renderSourcesDropdown();
+    renderRowsList();
+    renderMappingTable();
+    renderPreviews();
+    ok('Source removed.');
+  });
 
   lookupVal && lookupVal.addEventListener('keydown', e=>{
     if(e.key==='Enter') renderRowsList();

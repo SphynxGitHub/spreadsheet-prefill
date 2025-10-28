@@ -2,16 +2,10 @@
 (function(){
   // ---------- Safe shims when testing outside Jotform ----------
   if (typeof window.JFCustomWidget === 'undefined') {
-    window.JFCustomWidget = {
-      subscribe: () => {},
-      sendData: () => {}
-    };
+    window.JFCustomWidget = { subscribe: () => {}, sendData: () => {} };
   }
   if (typeof window.JF === 'undefined') {
-    window.JF = {
-      login: (ok, fail) => fail && fail(),
-      getAPIKey: () => null
-    };
+    window.JF = { login: (ok, fail) => fail && fail(), getAPIKey: () => null };
   }
 
   // ---------- State ----------
@@ -25,7 +19,8 @@
   /** mapping: { [qid]: { sourceId, column } } */
   let mapping = JSON.parse(localStorage.getItem('lf_mapping')||'{}');
 
-  let questions = []; // [{qid,label,type,name,order}]
+  // questions: [{qid,label,type,name,order, raw, isStatic, choices:[...], allowsMultiple:boolean}]
+  let questions = [];
   let activeSourceId = sources[0]?.id || null;
   let selectedRow = null; // raw row object from the chosen source
 
@@ -55,8 +50,8 @@
   apiBaseSel && (apiBaseSel.value = apiBase);
 
   // ---------- Helpers ----------
-  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1200); }
-  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',4000); }
+  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1600); }
+  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',6000); }
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
@@ -64,7 +59,7 @@
 
   function getSource(id){ return sources.find(s=>s.id===id) || null; }
   function setActiveSource(id){ activeSourceId = id; renderSourcesDropdown(); renderRowsList(); }
-  function pickRow(row){ selectedRow = row; renderPreviews(); }
+  function pickRow(row){ selectedRow = row; renderPreviews(); emitWidgetValue(); }
   function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
 
   // ---------- Form ID utilities ----------
@@ -72,13 +67,10 @@
     if (!url) return null;
     try {
       const u = new URL(url);
-      // Live form: https://form.jotform.com/123456789012345
       const liveMatch = u.pathname.match(/\/(\d{8,20})(\/|$)/);
       if (liveMatch) return liveMatch[1];
-      // Builder: https://www.jotform.com/build/123456789012345
       const buildMatch = u.pathname.match(/\/build\/(\d{8,20})(\/|$)/);
       if (buildMatch) return buildMatch[1];
-      // Query param
       const q = u.searchParams.get('formID') || u.searchParams.get('formId');
       if (q && /^\d{8,20}$/.test(q)) return q;
     } catch(_) {}
@@ -155,7 +147,45 @@
     saveSources();
   }
 
-  // ---------- Jotform API ----------
+  // ---------- Jotform question helpers ----------
+  const STATIC_TYPES = new Set([
+    'control_head','control_text','control_image','control_button','control_divider',
+    'control_collapse','control_pagebreak','control_separator'
+  ]);
+  const MULTI_TYPES = new Set(['control_checkbox']); // allows multiple choices
+  const SINGLE_TYPES_WITH_CHOICES = new Set(['control_dropdown','control_radio']);
+  function isStaticType(t){ return STATIC_TYPES.has((t||'').toLowerCase()); }
+  function allowsMultiple(t){ return MULTI_TYPES.has((t||'').toLowerCase()); }
+  function hasChoices(t){ const tt=(t||'').toLowerCase(); return SINGLE_TYPES_WITH_CHOICES.has(tt) || MULTI_TYPES.has(tt); }
+
+  function extractChoicesFromRaw(raw){
+    // Jotform question raw often has "options" as:
+    // - array of strings, or
+    // - string "A|B|C", or
+    // - object with .options or .items etc. We'll be defensive.
+    const r = raw || {};
+    let opts = [];
+
+    if (Array.isArray(r.options)) {
+      opts = r.options.slice();
+    } else if (typeof r.options === 'string') {
+      opts = r.options.split('|').map(s=>s.trim()).filter(Boolean);
+    } else if (Array.isArray(r.items)) {
+      opts = r.items.map(x => (typeof x==='string'?x:(x?.text||''))).filter(Boolean);
+    } else if (typeof r.specialOptions === 'string') { // fallback if provided
+      opts = r.specialOptions.split('|').map(s=>s.trim()).filter(Boolean);
+    }
+
+    // Dedup & clean
+    const seen = new Set();
+    const clean = [];
+    opts.forEach(o=>{
+      const k = String(o||'').trim();
+      if (k && !seen.has(k)) { seen.add(k); clean.push(k); }
+    });
+    return clean;
+  }
+
   async function getQuestions(){
     if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
@@ -164,32 +194,85 @@
     if(!resp.ok) throw new Error(`Questions fetch failed: ${resp.status}`);
     const json = await resp.json();
     const map = json.content || {};
-    questions = Object.keys(map).map(qid=>({
-      qid,
-      label: map[qid].text || '',
-      type: map[qid].type || '',
-      name: map[qid].name || '',
-      order: map[qid].order || 0
-    })).sort((a,b)=>a.order - b.order);
+
+    // Build enhanced questions array
+    questions = Object.keys(map).map(qid=>{
+      const raw = map[qid] || {};
+      const type = raw.type || '';
+      const label = raw.text || '';
+      const order = raw.order || 0;
+      const staticQ = isStaticType(type);
+      const choices = hasChoices(type) ? extractChoicesFromRaw(raw) : [];
+      const multi = allowsMultiple(type);
+      return { qid, label, type, name: raw.name || '', order, raw, isStatic: staticQ, choices, allowsMultiple: multi };
+    }).filter(q => !q.isStatic) // <-- Hide static fields from mapping
+      .sort((a,b)=>a.order - b.order);
   }
 
+  // Normalize a value for choice questions (respect allowed choices; support multi via comma/semicolon/pipe)
+  function normalizeChoiceValue(q, rawVal){
+    if (!hasChoices(q.type)) return rawVal;
+    const choicesSet = new Set(q.choices.map(c => c.toLowerCase()));
+    const splitIfMulti = v => String(v).split(/[;,|]/).map(s=>s.trim()).filter(Boolean);
+
+    if (q.allowsMultiple) {
+      const parts = Array.isArray(rawVal) ? rawVal : splitIfMulti(rawVal);
+      const picked = parts
+        .map(p => p.trim())
+        .filter(p => choicesSet.has(p.toLowerCase()));
+      // Jotform accepts comma-separated for checkbox
+      return picked.join(', ');
+    } else {
+      const v = String(rawVal||'').trim();
+      if (choicesSet.has(v.toLowerCase())) return v;
+      // attempt loose match by case-insensitive contains
+      const loose = q.choices.find(c => c.toLowerCase() === v.toLowerCase());
+      return loose || ''; // if not valid, send empty to avoid API rejecting
+    }
+  }
+
+  // ---------- Submission build/post ----------
   function buildSubmissionBody(rowBySource){
     const data=new URLSearchParams();
     Object.keys(mapping).forEach(qid=>{
       const m = mapping[qid]; if(!m) return;
       const r = rowBySource[m.sourceId]; if(!r) return;
-      const val = r[m.column] ?? '';
+
+      const q = questions.find(qq => qq.qid === qid);
+      const rawVal = r[m.column] ?? '';
+
+      const val = q ? normalizeChoiceValue(q, rawVal) : rawVal;
       data.append(`submission[${qid}]`, val);
     });
     return data;
   }
+
   async function createSubmission(body){
     if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
     const url = `${apiBase}/form/${formId}/submissions?apiKey=${encodeURIComponent(apiKey)}`;
     const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
-    if(!resp.ok) throw new Error(`Create submission failed: ${resp.status}`);
-    const json=await resp.json();
+    let text;
+    try { text = await resp.text(); } catch(_){}
+    if(!resp.ok){
+      // Try to surface API error content
+      let msg = `Create submission failed: ${resp.status}`;
+      if (text) {
+        try {
+          const j = JSON.parse(text);
+          if (j && (j.message || j.error || j.details)) {
+            msg += ` — ${j.message || j.error || j.details}`;
+          } else {
+            msg += ` — ${text.slice(0,300)}`;
+          }
+        } catch(_) {
+          msg += ` — ${text.slice(0,300)}`;
+        }
+      }
+      throw new Error(msg);
+    }
+    let json = {};
+    try { json = text ? JSON.parse(text) : {}; } catch(_){}
     const c = json.content || {};
     const sid = c.id || c.submissionID || c.sid || null;
     if(!sid) throw new Error('Submission created but ID not found.');
@@ -259,12 +342,12 @@
   }
 
   if (addSource) {
-    addSource && addSource.addEventListener('click', async ()=>{
+    addSource.addEventListener('click', async ()=>{
       const name  = (srcName?.value || '').trim();
       const url   = (srcUrl?.value  || '').trim();
       const keyCol= (srcKeyCol?.value || '').trim();
       if (!name || !url) { err('Enter a tab name and CSV URL.'); return; }
-    
+
       // If a source with the same URL exists, update it instead of duplicating
       const existing = sources.find(x => x.url === url);
       if (existing) {
@@ -275,12 +358,10 @@
           activeSourceId = existing.id;
           renderSourcesDropdown(); renderRowsList(); renderMappingTable();
           ok('Updated existing source.');
-        } catch (e) {
-          err(e.message || 'Failed to refresh the existing source.');
-        }
+        } catch (e) { err(e.message || 'Failed to refresh the existing source.'); }
         return;
       }
-    
+
       // Otherwise create a new source
       const s = { id: uid(), name, url, keyCol: keyCol || null, headers: null, rows: null };
       sources.push(s); saveSources();
@@ -289,9 +370,7 @@
         activeSourceId = s.id;
         renderSourcesDropdown(); renderRowsList(); renderMappingTable();
         ok('Source added.');
-      } catch (e) {
-        err(e.message || 'Failed to load CSV.');
-      }
+      } catch (e) { err(e.message || 'Failed to load CSV.'); }
     });
   }
 
@@ -309,21 +388,21 @@
     const s = getSource(activeSourceId);
     if (!s) { err('No source selected.'); return; }
     if (!confirm(`Remove source "${s.name}"? This will also clear any field mappings that use it.`)) return;
-  
+
     // 1) remove from sources
     sources = sources.filter(x => x.id !== s.id);
-  
+
     // 2) clear mappings that referenced this source
     Object.keys(mapping).forEach(qid => {
       if (mapping[qid]?.sourceId === s.id) delete mapping[qid];
     });
-  
+
     // 3) clear selected row if it came from this source
     if (selectedRow?.__sourceId === s.id) selectedRow = null;
-  
+
     // 4) pick a new active source (if any)
     activeSourceId = sources[0]?.id || null;
-  
+
     // 5) persist + repaint
     saveSources();
     saveMapping();
@@ -331,6 +410,7 @@
     renderRowsList();
     renderMappingTable();
     renderPreviews();
+    emitWidgetValue();
     ok('Source removed.');
   });
 
@@ -395,8 +475,24 @@
     sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
 
     questions.forEach(q=>{
+      // q.isStatic already filtered in getQuestions; keep guard if needed:
+      if (q.isStatic) return;
+
       const tr=document.createElement('tr');
-      const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
+      const td1=document.createElement('td');
+      const labelEl = document.createElement('div');
+      labelEl.textContent = `${q.label} (${q.type.replace('control_','')})`;
+      td1.appendChild(labelEl);
+
+      if (q.choices && q.choices.length) {
+        // show available choices inline (read-only)
+        const pills = document.createElement('div');
+        pills.className = 'mini';
+        pills.style.marginTop = '4px';
+        pills.textContent = `Choices: ${q.choices.join(' • ')}`;
+        td1.appendChild(pills);
+      }
+
       const td2=document.createElement('td'); td2.textContent = q.qid;
       const td3=document.createElement('td');
 
@@ -464,25 +560,52 @@
     }
     if (rowPreview) rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
 
+    // Build preview respecting choice normalization
     const preview = {};
     Object.keys(mapping).forEach(qid=>{
       const m = mapping[qid];
-      const r = rowBySource[m.sourceId];
-      if(r) preview[`submission[${qid}]`] = r[m.column] ?? '';
+      const r = rowBySource[m?.sourceId];
+      if(!r) return;
+      const q = questions.find(qq => qq.qid === qid);
+      const rawVal = r[m.column] ?? '';
+      const val = q ? normalizeChoiceValue(q, rawVal) : rawVal;
+      preview[`submission[${qid}]`] = val;
     });
     if (payloadPreview) payloadPreview.textContent = Object.keys(preview).length ? JSON.stringify(preview, null, 2) : '(no mapped values or no selected row)';
+  }
+
+  // Button loading helper
+  function setBusy(btn, busy=true){
+    if (!btn) return;
+    if (busy){
+      btn.disabled = true;
+      btn.dataset.label = btn.textContent;
+      btn.textContent = 'Submitting…';
+    } else {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+      delete btn.dataset.label;
+    }
   }
 
   createSubmit && createSubmit.addEventListener('click', async ()=>{
     try{
       if(!selectedRow){ err('Pick a row first.'); return; }
+      if(!apiKey){ err('Authorize or paste API key first.'); return; }
+      if(!formId){ err('Form ID not available. Click “Save Form ID” or open from a form page.'); return; }
+
+      setBusy(createSubmit, true);
       const rowBySource = { [selectedRow.__sourceId]: selectedRow };
       const body = buildSubmissionBody(rowBySource);
       const sid = await createSubmission(body);
       const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
       if (resultBox) resultBox.innerHTML = `<div class="ok" style="display:block">Created submission <b>${sid}</b>. <a href="${editUrl}" target="_top" rel="noopener">Open Edit Page</a></div>`;
       try{ window.top.location.href = editUrl; }catch(_){}
-    }catch(e){ err(e.message||'Failed to create submission.'); }
+    }catch(e){
+      err(e.message||'Failed to create submission.');
+    }finally{
+      setBusy(createSubmit, false);
+    }
   });
 
   // ---------- Widget value emitter ----------

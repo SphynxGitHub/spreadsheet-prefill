@@ -1,97 +1,121 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Live Spreadsheet Prefill</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="//js.jotform.com/JotFormCustomWidget.min.js"></script>
+  <title>Live Sheet → Jotform Prefill & Submit</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+  <script src="https://js.jotform.com/JotForm.js"></script>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <style>
-    :root { --line:#e5e7eb; --muted:#6b7280; --brand:#2563eb; --bg:#fafafa; --card:#fff; --danger:#e11d48; }
-    html,body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#111}
-    .wrap{max-width:1000px;margin:0 auto;padding:12px}
-    .toolbar,.footer{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    input,select,button{font:inherit}
-    input[type="text"]{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;min-width:220px}
-    select{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff}
-    button{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;cursor:pointer}
-    .primary{background:var(--brand);border-color:var(--brand);color:#fff}
-    .danger{color:var(--danger);border-color:#fecaca}
-    .mini{color:var(--muted);font-size:12px}
-    .list{margin-top:10px;border:1px solid var(--line);border-radius:12px;background:#fff;max-height:300px;overflow:auto}
-    .row{padding:10px 12px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;cursor:pointer}
-    .row:first-child{border-top:none}
-    .pill{display:inline-block;background:#eef2ff;border:1px solid #c7d2fe;color:#1e3a8a;border-radius:999px;padding:3px 8px;font-size:12px}
-    .card{margin-top:12px;border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px}
-    .kv{display:grid;grid-template-columns:180px 1fr;gap:6px;align-items:center}
-    .kv div{padding:3px 0}
-    .msg{margin-top:8px;font-size:13px}
-    .ok{color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;padding:8px;border-radius:10px}
-    .err{color:#991b1b;background:#fef2f2;border:1px solid #fecaca;padding:8px;border-radius:10px}
-    .grid{display:grid;grid-template-columns:1fr;gap:10px}
-    .section{border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px}
-    .section h4{margin:0 0 8px 0;font-size:15px}
-    .map-table{width:100%;border-collapse:collapse;margin-top:6px}
-    .map-table th,.map-table td{border-top:1px solid var(--line);padding:6px}
-    .map-table th{font-weight:600;text-align:left;color:#374151;background:#f9fafb}
-    .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;background:#eef2ff;color:#1e3a8a;border:1px solid #c7d2fe;border-radius:999px;font-size:12px}
-    .inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    .controls-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+    :root{
+      --bg:#f7f7f9; --card:#fff; --line:#e6e6ea; --text:#2b2f36; --muted:#6b7280; --accent:#3b82f6; --ok:#16a34a; --err:#dc2626;
+      --radius:12px;
+    }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    .wrap{max-width:1080px;margin:0 auto;padding:14px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-bottom:12px}
+    h3{margin:0 0 8px 0;font-size:16px}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+    input[type="text"], input[type="password"], select, textarea{
+      border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fff;min-width:220px;font:inherit
+    }
+    textarea{width:100%;min-height:80px}
+    .btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
+    .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .muted{color:var(--muted);font-size:12px}
+    .ok{color:#065f46;background:#ecfdf5;border:1px solid #bbf7d0;padding:8px;border-radius:10px;margin:6px 0;display:none}
+    .err{color:#991b1b;background:#fef2f2;border:1px solid #fecaca;padding:8px;border-radius:10px;margin:6px 0;display:none}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{border:1px solid var(--line);padding:8px;vertical-align:top}
+    th{background:#fafafd;text-align:left}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:12px;border:1px solid #bfdbfe}
+    .list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+    .list table{margin:0;border-collapse:separate;border-spacing:0}
+    .list th, .list td{border-width:0 0 1px 0}
+    .list tr:hover{background:#fafafa}
+    .flex-end{display:flex;justify-content:flex-end;gap:8px}
+    .mini{font-size:12px;color:#475569}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <!-- Data controls -->
-    <div class="toolbar">
-      <input id="csvUrl" type="text" placeholder="Live CSV URL (Google Sheets → Publish to CSV)" />
-      <input id="keyInput" type="text" placeholder="Lookup key (e.g., email, code...)" />
-      <button id="searchBtn" class="primary">Search</button>
-      <button id="reloadBtn">Reload</button>
-      <span class="mini">Tip: File → Share → Publish to web → CSV.</span>
+<div class="wrap">
+  <!-- Auth -->
+  <div class="card">
+    <h3>Authorize & Load Form</h3>
+    <div class="row">
+      <button id="loginBtn" class="btn">Login with Jotform</button>
+      <input id="apiKey" type="password" placeholder="or paste API key…" />
+      <select id="apiBase">
+        <option value="https://api.jotform.com">Global</option>
+        <option value="https://eu-api.jotform.com">EU</option>
+        <option value="https://hipaa-api.jotform.com">HIPAA</option>
+      </select>
+      <button id="saveKey" class="btn">Save</button>
     </div>
-
-    <div class="toolbar" style="margin-top:6px">
-      <label class="mini">Key Column</label>
-      <select id="keyCol"></select>
-      <label class="mini">Show Columns</label>
-      <select id="showCols" multiple size="1" style="min-width:220px"></select>
+    <div class="row">
+      <button id="loadFields" class="btn primary">Load Form Questions</button>
+      <span id="formIdLabel" class="muted"></span>
     </div>
-
-    <div id="list" class="list"></div>
-
-    <!-- Details & mapping preview -->
-    <div id="details" class="card" style="display:none"></div>
-
-    <!-- Mapping UI -->
-    <div class="section">
-      <h4>Field Mapping</h4>
-      <div class="mini">Map sheet columns to target names you’ll reference in Jotform Conditions (e.g., map “Email” → “Client Email”).</div>
-      <div class="controls-row">
-        <button id="addMap" class="primary">Add Mapping</button>
-        <button id="autoMap">Auto-map</button>
-        <button id="importMap">Import JSON</button>
-        <button id="exportMap">Export JSON</button>
-        <span id="mapStatus" class="mini"></span>
-      </div>
-      <table class="map-table" id="mapTable">
-        <thead>
-          <tr>
-            <th style="width:28%">Source Column</th>
-            <th style="width:28%">Target Name</th>
-            <th style="width:18%">Transform</th>
-            <th style="width:14%">Required</th>
-            <th style="width:12%"></th>
-          </tr>
-        </thead>
-        <tbody id="mapBody"></tbody>
-      </table>
-    </div>
-
-    <div class="footer" style="justify-content:flex-end;margin-top:8px">
-      <button id="useBtn" class="primary" disabled>Use This Row</button>
-    </div>
-
-    <div id="msg" class="msg"></div>
+    <div id="flashOk" class="ok"></div>
+    <div id="flashErr" class="err"></div>
   </div>
-  <script src="app.js"></script>
+
+  <!-- Sources -->
+  <div class="card">
+    <h3>Live Spreadsheet Sources (multiple tabs)</h3>
+    <div class="grid">
+      <input id="srcName" type="text" placeholder="Tab name (e.g., Contacts)" />
+      <input id="srcUrl" type="text" placeholder="CSV URL (published sheet or /export?format=csv&gid=)" />
+      <input id="srcKeyCol" type="text" placeholder="Key column name (e.g., Email)" />
+      <button id="addSource" class="btn">Add Source</button>
+    </div>
+    <div class="row">
+      <select id="activeSource"></select>
+      <input id="lookupVal" type="text" placeholder="Lookup key (optional, press Enter or Search)" />
+      <button id="btnSearch" class="btn">Search</button>
+      <button id="btnReloadCsv" class="btn">Reload CSV</button>
+    </div>
+    <div class="list" id="rowsList" aria-live="polite"></div>
+    <div class="mini">Tip: you can leave Lookup blank and just click a row below. The first row of the CSV must be headers.</div>
+  </div>
+
+  <!-- Mapping -->
+  <div class="card">
+    <h3>Map Sheet Columns → Jotform Questions</h3>
+    <div class="mini">Pick which sheet column to use for each Jotform field. Options are grouped by source (tab).</div>
+    <table id="mapTable">
+      <thead><tr><th>Question (type)</th><th>QID</th><th>Sheet Column</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row">
+      <button id="clearMap" class="btn">Clear Mapping</button>
+      <button id="autoMap" class="btn">Auto-map by label match</button>
+      <span class="muted">You can fine-tune after auto-mapping.</span>
+    </div>
+  </div>
+
+  <!-- Preview & Submit -->
+  <div class="card">
+    <h3>Preview & Submit</h3>
+    <div class="grid">
+      <div>
+        <div class="mini">Selected Row Preview (raw)</div>
+        <pre id="rowPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+      </div>
+      <div>
+        <div class="mini">Submission Payload Preview</div>
+        <pre id="payloadPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+      </div>
+    </div>
+    <div class="flex-end">
+      <button id="createSubmit" class="btn primary">Create Submission & Open Edit</button>
+    </div>
+    <div id="resultBox"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>

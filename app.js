@@ -64,6 +64,60 @@
 
   function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
 
+  // ---------- Form ID------------------
+  let formId = null;  // stays
+  let apiKey = localStorage.getItem('lf_apiKey') || '';
+  let apiBase = localStorage.getItem('lf_apiBase') || 'https://api.jotform.com';
+  let manualFormId = localStorage.getItem('lf_manualFormId') || '';
+  
+  const manualFormIdIn = document.getElementById('manualFormId');
+  const saveFormIdBtn  = document.getElementById('saveFormId');
+  if (manualFormIdIn) manualFormIdIn.value = manualFormId;
+  
+  // Try to pull a form id out of a URL string (live or builder)
+  function extractFormIdFromUrl(url) {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      // Live form: https://form.jotform.com/123456789012345
+      const liveMatch = u.pathname.match(/\/(\d{8,20})(\/|$)/);
+      if (liveMatch) return liveMatch[1];
+  
+      // Builder: https://www.jotform.com/build/123456789012345
+      const buildMatch = u.pathname.match(/\/build\/(\d{8,20})(\/|$)/);
+      if (buildMatch) return buildMatch[1];
+  
+      // Preview or other editors sometimes use /edit/… with ?formID=
+      const q = u.searchParams.get('formID') || u.searchParams.get('formId');
+      if (q && /^\d{8,20}$/.test(q)) return q;
+    } catch (e) {}
+    return null;
+  }
+  
+  // Decide the best formId available
+  function resolveFormId(payload) {
+    // 1) widget payload
+    if (payload && (payload.formId || payload.formID)) return String(payload.formId || payload.formID);
+  
+    // 2) referrer (parent page that loaded the widget)
+    const fromRef = extractFormIdFromUrl(document.referrer);
+    if (fromRef) return fromRef;
+  
+    // 3) manual override
+    if (manualFormId && /^\d{8,20}$/.test(manualFormId)) return manualFormId;
+  
+    return null;
+  }
+  if (saveFormIdBtn) {
+    saveFormIdBtn.addEventListener('click', () => {
+      manualFormId = (manualFormIdIn?.value || '').trim();
+      localStorage.setItem('lf_manualFormId', manualFormId);
+      formId = manualFormId || formId; // adopt it immediately
+      formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+      ok('Form ID saved.');
+    });
+  }
+
   // ---------- CSV Fetch/Parse ----------
   async function fetchCsv(url){
     const res = await fetch(url, { mode:'cors' });
@@ -167,9 +221,13 @@
   }
 
   // ---------- UI: Auth ----------
-  JFCustomWidget.subscribe('ready', payload=>{
-    formId = payload && payload.formId ? String(payload.formId) : null;
-    formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+  JFCustomWidget.subscribe('ready', payload => {
+    formId = resolveFormId(payload);
+  
+    formIdLabel.textContent = formId
+      ? `Form ID: ${formId}`
+      : 'Form ID not available — paste it above and click “Save Form ID”.';
+  
     renderSourcesDropdown();
     renderRowsList();
     renderMappingTable();

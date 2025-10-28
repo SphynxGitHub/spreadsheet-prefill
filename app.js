@@ -1,9 +1,24 @@
 /* globals JFCustomWidget, JF */
 (function(){
+  // ---------- Safe shims when testing outside Jotform ----------
+  if (typeof window.JFCustomWidget === 'undefined') {
+    window.JFCustomWidget = {
+      subscribe: () => {},
+      sendData: () => {}
+    };
+  }
+  if (typeof window.JF === 'undefined') {
+    window.JF = {
+      login: (ok, fail) => fail && fail(),
+      getAPIKey: () => null
+    };
+  }
+
   // ---------- State ----------
   let formId = null;
-  let apiKey = localStorage.getItem('lf_apiKey') || '';
+  let apiKey  = localStorage.getItem('lf_apiKey')  || '';
   let apiBase = localStorage.getItem('lf_apiBase') || 'https://api.jotform.com';
+  let manualFormId = localStorage.getItem('lf_manualFormId') || '';
 
   /** sources: [{id,name,url,keyCol, headers:[], rows:[{}]}] */
   let sources = JSON.parse(localStorage.getItem('lf_sources')||'[]');
@@ -21,6 +36,10 @@
   const loginBtn = $('loginBtn'), saveKey = $('saveKey'), loadFields = $('loadFields');
   const apiKeyIn = $('apiKey'), apiBaseSel = $('apiBase');
 
+  const manualFormIdIn = $('manualFormId');
+  const saveFormIdBtn  = $('saveFormId');
+  if (manualFormIdIn) manualFormIdIn.value = manualFormId;
+
   const srcName = $('srcName'), srcUrl = $('srcUrl'), srcKeyCol = $('srcKeyCol');
   const addSource = $('addSource'), activeSource = $('activeSource');
   const lookupVal = $('lookupVal'), btnSearch = $('btnSearch'), btnReloadCsv = $('btnReloadCsv');
@@ -31,50 +50,23 @@
   const rowPreview = $('rowPreview'), payloadPreview = $('payloadPreview');
   const createSubmit = $('createSubmit'), resultBox = $('resultBox');
 
-  apiKeyIn.value = apiKey;
-  apiBaseSel.value = apiBase;
+  apiKeyIn && (apiKeyIn.value = apiKey);
+  apiBaseSel && (apiBaseSel.value = apiBase);
 
   // ---------- Helpers ----------
-  function ok(msg='Done.'){ flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1200); }
-  function err(msg){ flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',4000); }
+  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1200); }
+  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',4000); }
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
   function saveMapping(){ localStorage.setItem('lf_mapping', JSON.stringify(mapping)); emitWidgetValue(); }
 
   function getSource(id){ return sources.find(s=>s.id===id) || null; }
-  function allHeadersGrouped(){
-    // [{label:'[Contacts] Email', sourceId, column, rawLabel}]
-    const opts = [];
-    sources.forEach(s=>{
-      (s.headers||[]).forEach(h=>{
-        opts.push({ label:`[${s.name}] ${h}`, sourceId:s.id, column:h, rawLabel:h });
-      });
-    });
-    return opts;
-  }
-
-  function setActiveSource(id){
-    activeSourceId = id;
-    renderSourcesDropdown();
-    renderRowsList();
-  }
-
+  function setActiveSource(id){ activeSourceId = id; renderSourcesDropdown(); renderRowsList(); }
   function pickRow(row){ selectedRow = row; renderPreviews(); }
-
   function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
 
-  // ---------- Form ID------------------
-  let formId = null;  // stays
-  let apiKey = localStorage.getItem('lf_apiKey') || '';
-  let apiBase = localStorage.getItem('lf_apiBase') || 'https://api.jotform.com';
-  let manualFormId = localStorage.getItem('lf_manualFormId') || '';
-  
-  const manualFormIdIn = document.getElementById('manualFormId');
-  const saveFormIdBtn  = document.getElementById('saveFormId');
-  if (manualFormIdIn) manualFormIdIn.value = manualFormId;
-  
-  // Try to pull a form id out of a URL string (live or builder)
+  // ---------- Form ID utilities ----------
   function extractFormIdFromUrl(url) {
     if (!url) return null;
     try {
@@ -82,38 +74,29 @@
       // Live form: https://form.jotform.com/123456789012345
       const liveMatch = u.pathname.match(/\/(\d{8,20})(\/|$)/);
       if (liveMatch) return liveMatch[1];
-  
       // Builder: https://www.jotform.com/build/123456789012345
       const buildMatch = u.pathname.match(/\/build\/(\d{8,20})(\/|$)/);
       if (buildMatch) return buildMatch[1];
-  
-      // Preview or other editors sometimes use /edit/… with ?formID=
+      // Query param
       const q = u.searchParams.get('formID') || u.searchParams.get('formId');
       if (q && /^\d{8,20}$/.test(q)) return q;
-    } catch (e) {}
+    } catch(_) {}
     return null;
   }
-  
-  // Decide the best formId available
   function resolveFormId(payload) {
-    // 1) widget payload
     if (payload && (payload.formId || payload.formID)) return String(payload.formId || payload.formID);
-  
-    // 2) referrer (parent page that loaded the widget)
     const fromRef = extractFormIdFromUrl(document.referrer);
     if (fromRef) return fromRef;
-  
-    // 3) manual override
     if (manualFormId && /^\d{8,20}$/.test(manualFormId)) return manualFormId;
-  
     return null;
   }
+
   if (saveFormIdBtn) {
     saveFormIdBtn.addEventListener('click', () => {
       manualFormId = (manualFormIdIn?.value || '').trim();
       localStorage.setItem('lf_manualFormId', manualFormId);
       formId = manualFormId || formId; // adopt it immediately
-      formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+      if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
       ok('Form ID saved.');
     });
   }
@@ -126,7 +109,6 @@
     if (!res.ok || looksHtml) throw new Error('CSV not accessible. Publish the sheet/tab as CSV (or use /export?format=csv&gid=).');
     return parseCsvAuto(text);
   }
-
   function parseCsvAuto(raw){
     const first = raw.split(/\r?\n/,1)[0]||'';
     const candidates=[',',';','\t'];
@@ -137,7 +119,6 @@
     }
     return parseDelimited(raw,delim);
   }
-
   function parseDelimited(text,delim){
     const out=[]; let i=0, field='', row=[], inQ=false; const N=text.length;
     const pushF=()=>{ row.push(field); field=''; };
@@ -162,12 +143,10 @@
       .map(r=>{ const o={}; headers.forEach((h,idx)=>o[h]=r[idx]??''); return o; });
     return { headers, rows };
   }
-
   async function loadSourceData(s){
     const { headers, rows } = await fetchCsv(s.url);
     s.headers = headers;
     s.rows = rows;
-    // if keyCol missing, guess common ones
     if(!s.keyCol){
       const guess = headers.find(h=>/^(email|id|code)$/i.test(h)) || headers[0];
       s.keyCol = guess;
@@ -194,9 +173,6 @@
   }
 
   function buildSubmissionBody(rowBySource){
-    // rowBySource: { [sourceId]: selectedRowObj }
-    // mapping: { [qid]: { sourceId, column } }
-    // For now: simple fields => submission[qid] = row[column]
     const data=new URLSearchParams();
     Object.keys(mapping).forEach(qid=>{
       const m = mapping[qid]; if(!m) return;
@@ -206,7 +182,6 @@
     });
     return data;
   }
-
   async function createSubmission(body){
     if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
@@ -223,45 +198,52 @@
   // ---------- UI: Auth ----------
   JFCustomWidget.subscribe('ready', payload => {
     formId = resolveFormId(payload);
-  
-    formIdLabel.textContent = formId
-      ? `Form ID: ${formId}`
-      : 'Form ID not available — paste it above and click “Save Form ID”.';
-  
+    if (formIdLabel) {
+      formIdLabel.textContent = formId
+        ? `Form ID: ${formId}`
+        : 'Form ID not available — paste it above and click “Save Form ID”.';
+    }
     renderSourcesDropdown();
     renderRowsList();
     renderMappingTable();
-    emitWidgetValue(); // push current saved config to parent
+    emitWidgetValue();
   });
 
-  loginBtn.addEventListener('click', ()=>{
-    JF.login(()=>{
+  if (loginBtn) {
+    loginBtn.addEventListener('click', ()=>{
+      JF.login(()=>{
+        try{
+          const k = JF.getAPIKey();
+          if(k){ apiKey = k; if(apiKeyIn) apiKeyIn.value = k; localStorage.setItem('lf_apiKey', apiKey); ok('Authorized.'); }
+          else err('Login ok, but API key not returned.');
+        }catch(e){ err('Login ok, but API key not returned.'); }
+      }, ()=> err('Login failed or canceled.'));
+    });
+  }
+
+  if (saveKey) {
+    saveKey.addEventListener('click', ()=>{
+      apiKey = (apiKeyIn?.value || '').trim();
+      apiBase = (apiBaseSel?.value || 'https://api.jotform.com');
+      localStorage.setItem('lf_apiKey', apiKey);
+      localStorage.setItem('lf_apiBase', apiBase);
+      ok('Saved.');
+    });
+  }
+
+  if (loadFields) {
+    loadFields.addEventListener('click', async ()=>{
       try{
-        const k = JF.getAPIKey();
-        if(k){ apiKey = k; apiKeyIn.value = k; localStorage.setItem('lf_apiKey', apiKey); ok('Authorized.'); }
-        else err('Login ok, but API key not returned.');
-      }catch(e){ err('Login ok, but API key not returned.'); }
-    }, ()=> err('Login failed or canceled.'));
-  });
-
-  saveKey.addEventListener('click', ()=>{
-    apiKey = apiKeyIn.value.trim();
-    apiBase = apiBaseSel.value;
-    localStorage.setItem('lf_apiKey', apiKey);
-    localStorage.setItem('lf_apiBase', apiBase);
-    ok('Saved.');
-  });
-
-  loadFields.addEventListener('click', async ()=>{
-    try{
-      await getQuestions();
-      renderMappingTable();
-      ok('Questions loaded.');
-    }catch(e){ err(e.message||'Failed to load questions.'); }
-  });
+        await getQuestions();
+        renderMappingTable();
+        ok('Questions loaded.');
+      }catch(e){ err(e.message||'Failed to load questions.'); }
+    });
+  }
 
   // ---------- UI: Sources ----------
   function renderSourcesDropdown(){
+    if(!activeSource) return;
     activeSource.innerHTML = '';
     if(!sources.length){
       activeSource.appendChild(new Option('— no sources —',''));
@@ -275,50 +257,53 @@
     activeSource.value = activeSourceId;
   }
 
-  addSource.addEventListener('click', async ()=>{
-    const name = (srcName.value||'').trim();
-    const url = (srcUrl.value||'').trim();
-    const keyCol = (srcKeyCol.value||'').trim();
-    if(!name || !url){ err('Enter a tab name and CSV URL.'); return; }
-    const s = { id:uid(), name, url, keyCol:keyCol||null, headers:null, rows:null };
-    sources.push(s); saveSources();
-    try{
-      await loadSourceData(s);
-      activeSourceId = s.id; renderSourcesDropdown(); renderRowsList(); renderMappingTable();
-      ok('Source added.');
-    }catch(e){
-      err(e.message||'Failed to load CSV.');
-    }
-  });
+  if (addSource) {
+    addSource.addEventListener('click', async ()=>{
+      const name = (srcName?.value||'').trim();
+      const url = (srcUrl?.value||'').trim();
+      const keyCol = (srcKeyCol?.value||'').trim();
+      if(!name || !url){ err('Enter a tab name and CSV URL.'); return; }
+      const s = { id:uid(), name, url, keyCol:keyCol||null, headers:null, rows:null };
+      sources.push(s); saveSources();
+      try{
+        await loadSourceData(s);
+        activeSourceId = s.id; renderSourcesDropdown(); renderRowsList(); renderMappingTable();
+        ok('Source added.');
+      }catch(e){
+        err(e.message||'Failed to load CSV.');
+      }
+    });
+  }
 
-  activeSource.addEventListener('change', ()=> setActiveSource(activeSource.value));
+  activeSource && activeSource.addEventListener('change', ()=> setActiveSource(activeSource.value));
 
-  btnReloadCsv.addEventListener('click', async ()=>{
+  btnReloadCsv && btnReloadCsv.addEventListener('click', async ()=>{
     const s = getSource(activeSourceId); if(!s) return;
     try{ await loadSourceData(s); renderRowsList(); renderMappingTable(); ok('CSV reloaded.'); }
     catch(e){ err(e.message||'Reload failed.'); }
   });
 
-  btnSearch.addEventListener('click', ()=> renderRowsList());
+  btnSearch && btnSearch.addEventListener('click', ()=> renderRowsList());
 
-  lookupVal.addEventListener('keydown', e=>{
+  lookupVal && lookupVal.addEventListener('keydown', e=>{
     if(e.key==='Enter') renderRowsList();
   });
 
   function renderRowsList(){
     const s = getSource(activeSourceId);
+    if(!rowsList) return;
     rowsList.innerHTML = '';
     if(!s){ rowsList.innerHTML='<div class="mini">Pick or add a source.</div>'; return; }
     if(!s.headers){ rowsList.innerHTML='<div class="mini">No data loaded yet. Click “Reload CSV”.</div>'; return; }
 
-    const q = (lookupVal.value||'').toLowerCase().trim();
+    const q = (lookupVal?.value||'').toLowerCase().trim();
     const keyCol = s.keyCol && s.headers.includes(s.keyCol) ? s.keyCol : s.headers[0];
 
     const subset = (s.rows||[]).filter(r=>{
       if(!q) return true;
       const v = String(r[keyCol]??'').toLowerCase();
       return v.includes(q);
-    }).slice(0,200); // cap display
+    }).slice(0,200);
 
     const tbl=document.createElement('table');
     const thead=document.createElement('thead'), tbody=document.createElement('tbody');
@@ -344,13 +329,14 @@
 
     if(!subset.length){
       const d=document.createElement('div'); d.className='mini';
-      d.textContent = q ? `No matches for "${lookupVal.value}" in ${keyCol}.` : 'No rows found.';
+      d.textContent = q ? `No matches for "${lookupVal?.value}" in ${keyCol}.` : 'No rows found.';
       rowsList.appendChild(d);
     }
   }
 
   // ---------- UI: Mapping ----------
   function renderMappingTable(){
+    if(!mapTableBody) return;
     mapTableBody.innerHTML='';
     if(!questions.length){
       mapTableBody.innerHTML='<tr><td colspan="3" class="muted">Load Jotform questions first.</td></tr>';
@@ -360,10 +346,6 @@
     sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
 
     questions.forEach(q=>{
-      // Filter to common types first; you can loosen this if you want all
-      const supported = true; // let’s allow mapping to any QID; advanced types can be enhanced later
-      if(!supported) return;
-
       const tr=document.createElement('tr');
       const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
       const td2=document.createElement('td'); td2.textContent = q.qid;
@@ -383,10 +365,7 @@
         sel.appendChild(og);
       });
 
-      // restore saved mapping
-      if(mapping[q.qid]){
-        sel.value = JSON.stringify(mapping[q.qid]);
-      }
+      if(mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
 
       sel.addEventListener('change', ()=>{
         if(!sel.value){ delete mapping[q.qid]; }
@@ -401,15 +380,14 @@
     });
   }
 
-  clearMap.addEventListener('click', ()=>{
+  clearMap && clearMap.addEventListener('click', ()=>{
     mapping = {};
     saveMapping();
     renderMappingTable();
     renderPreviews();
   });
 
-  autoMap.addEventListener('click', ()=>{
-    // naive: match question label → column (case-insensitive exact)
+  autoMap && autoMap.addEventListener('click', ()=>{
     const colsByLower = {};
     sources.forEach(s=>{
       (s.headers||[]).forEach(h=>{
@@ -431,43 +409,34 @@
 
   // ---------- Preview & Submit ----------
   function renderPreviews(){
-    // Selected row may belong to one source. But mapping can reference multiple sources.
-    // Build a per-source selected row object: use the clicked row for its source; for other sources, pick first row or none.
     const rowBySource = {};
-
     if(selectedRow && selectedRow.__sourceId){
       rowBySource[selectedRow.__sourceId] = selectedRow;
     }
-    // If a mapping references other sources and we don't have a picked row there, just leave undefined.
-    // (You could enhance to let user pick a row per source.)
+    if (rowPreview) rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
 
-    // Row preview = the clicked row only
-    rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
-
-    // Payload preview
     const preview = {};
     Object.keys(mapping).forEach(qid=>{
       const m = mapping[qid];
       const r = rowBySource[m.sourceId];
       if(r) preview[`submission[${qid}]`] = r[m.column] ?? '';
     });
-    payloadPreview.textContent = Object.keys(preview).length ? JSON.stringify(preview, null, 2) : '(no mapped values or no selected row)';
+    if (payloadPreview) payloadPreview.textContent = Object.keys(preview).length ? JSON.stringify(preview, null, 2) : '(no mapped values or no selected row)';
   }
 
-  createSubmit.addEventListener('click', async ()=>{
+  createSubmit && createSubmit.addEventListener('click', async ()=>{
     try{
       if(!selectedRow){ err('Pick a row first.'); return; }
-      // We only have a row for its source; any mappings for other sources will be skipped in this minimal flow.
       const rowBySource = { [selectedRow.__sourceId]: selectedRow };
       const body = buildSubmissionBody(rowBySource);
       const sid = await createSubmission(body);
       const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
-      resultBox.innerHTML = `<div class="ok" style="display:block">Created submission <b>${sid}</b>. <a href="${editUrl}" target="_top" rel="noopener">Open Edit Page</a></div>`;
+      if (resultBox) resultBox.innerHTML = `<div class="ok" style="display:block">Created submission <b>${sid}</b>. <a href="${editUrl}" target="_top" rel="noopener">Open Edit Page</a></div>`;
       try{ window.top.location.href = editUrl; }catch(_){}
     }catch(e){ err(e.message||'Failed to create submission.'); }
   });
 
-  // ---------- Widget value emitter (so you can capture config in the form) ----------
+  // ---------- Widget value emitter ----------
   const emit = debounce(()=>{
     const payload = {
       formId,
@@ -478,14 +447,12 @@
     };
     try{ JFCustomWidget.sendData({ value: JSON.stringify(payload) }); }catch(_){}
   }, 600);
-
   function emitWidgetValue(){ emit(); }
-
-  // re-emit on notable changes
   window.addEventListener('storage', emitWidgetValue);
 
   // ---------- Kick things off ----------
   function boot(){
+    if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
     renderSourcesDropdown();
     renderRowsList();
     renderMappingTable();

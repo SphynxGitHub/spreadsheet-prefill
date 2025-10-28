@@ -12,6 +12,22 @@
       --bg:#f7f7f9; --card:#fff; --line:#e6e6ea; --text:#2b2f36; --muted:#6b7280; --accent:#3b82f6; --ok:#16a34a; --err:#dc2626;
       --radius:12px;
     }
+    /* make the main wrapper scroll instead of the whole iframe */
+    html, body { height: 100%; }
+    * { box-sizing: border-box; }
+    
+    /* vertical scroll when content exceeds iframe height */
+    .wrap{
+      max-height: 100vh;             /* use the iframe’s viewport */
+      overflow: auto;                 /* scrolls inside widget */
+      -webkit-overflow-scrolling: touch; /* smooth on iOS */
+      overscroll-behavior: contain;   /* avoid scroll chaining */
+    }
+    
+    /* optional: prevent horizontal scroll if tables get wide */
+    .wrap { overflow-x: hidden; }
+    table { width: 100%; overflow-x: auto; display: block; }
+
     html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif}
     .wrap{max-width:1080px;margin:0 auto;padding:14px}
     .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-bottom:12px}
@@ -67,22 +83,21 @@
   <!-- Sources -->
   <div class="card">
     <h3>Live Spreadsheet Sources (multiple tabs)</h3>
-    <div class="grid">
-      <input id="srcName" type="text" placeholder="Tab name (e.g., Contacts)" />
-      <input id="srcUrl" type="text" placeholder="CSV URL (published sheet or /export?format=csv&gid=)" />
-      <input id="srcKeyCol" type="text" placeholder="Key column name (e.g., Email)" />
-      <button id="addSource" class="btn">Add Source</button>
-    </div>
+    <!-- ... add-source grid stays the same ... -->
+  
     <div class="row">
       <select id="activeSource"></select>
       <input id="lookupVal" type="text" placeholder="Lookup key (optional, press Enter or Search)" />
       <button id="btnSearch" class="btn">Search</button>
       <button id="btnReloadCsv" class="btn">Reload CSV</button>
+      <!-- NEW: remove current source -->
+      <button id="btnRemoveSource" class="btn">Remove Source</button>
     </div>
+  
     <div class="list" id="rowsList" aria-live="polite"></div>
     <div class="mini">Tip: you can leave Lookup blank and just click a row below. The first row of the CSV must be headers.</div>
   </div>
-
+ 
   <!-- Mapping -->
   <div class="card">
     <h3>Map Sheet Columns → Jotform Questions</h3>

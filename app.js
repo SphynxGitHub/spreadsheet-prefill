@@ -1,438 +1,437 @@
-/* global JFCustomWidget */
-let SETTINGS = {};
-let rows = [];
-let headers = [];
-let selected = null;
+/* globals JFCustomWidget, JF */
+(function(){
+  // ---------- State ----------
+  let formId = null;
+  let apiKey = localStorage.getItem('lf_apiKey') || '';
+  let apiBase = localStorage.getItem('lf_apiBase') || 'https://api.jotform.com';
 
-// mapping = [{ source, target, required, transform }]
-let mapping = [];
+  /** sources: [{id,name,url,keyCol, headers:[], rows:[{}]}] */
+  let sources = JSON.parse(localStorage.getItem('lf_sources')||'[]');
+  /** mapping: { [qid]: { sourceId, column } } */
+  let mapping = JSON.parse(localStorage.getItem('lf_mapping')||'{}');
 
-const $ = id => document.getElementById(id);
-const els = {
-  csvUrl: $('csvUrl'),
-  keyInput: $('keyInput'),
-  searchBtn: $('searchBtn'),
-  reloadBtn: $('reloadBtn'),
-  list: $('list'),
-  details: $('details'),
-  useBtn: $('useBtn'),
-  keyCol: $('keyCol'),
-  showCols: $('showCols'),
-  msg: $('msg'),
-  addMap: $('addMap'),
-  autoMap: $('autoMap'),
-  importMap: $('importMap'),
-  exportMap: $('exportMap'),
-  mapBody: $('mapBody'),
-  mapTable: $('mapTable'),
-  mapStatus: $('mapStatus'),
-};
+  let questions = []; // [{qid,label,type,name,order}]
+  let activeSourceId = sources[0]?.id || null;
+  let selectedRow = null; // raw row object from the chosen source
 
-function msg(text, ok=false) {
-  els.msg.className = 'msg ' + (ok ? 'ok' : 'err');
-  els.msg.textContent = text || '';
-  if (!text) els.msg.className = 'msg';
-}
+  // ---------- DOM ----------
+  const $ = id => document.getElementById(id);
+  const flashOk = $('flashOk'), flashErr = $('flashErr');
+  const formIdLabel = $('formIdLabel');
+  const loginBtn = $('loginBtn'), saveKey = $('saveKey'), loadFields = $('loadFields');
+  const apiKeyIn = $('apiKey'), apiBaseSel = $('apiBase');
 
-function ok(text) { msg(text, true); }
+  const srcName = $('srcName'), srcUrl = $('srcUrl'), srcKeyCol = $('srcKeyCol');
+  const addSource = $('addSource'), activeSource = $('activeSource');
+  const lookupVal = $('lookupVal'), btnSearch = $('btnSearch'), btnReloadCsv = $('btnReloadCsv');
+  const rowsList = $('rowsList');
 
-async function fetchCsv(url) {
-  const res = await fetch(url, { mode: 'cors' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const csv = await res.text();
-  return parseCsv(csv);
-}
+  const mapTableBody = document.querySelector('#mapTable tbody');
+  const clearMap = $('clearMap'), autoMap = $('autoMap');
+  const rowPreview = $('rowPreview'), payloadPreview = $('payloadPreview');
+  const createSubmit = $('createSubmit'), resultBox = $('resultBox');
 
-function parseCsv(csv) {
-  const out = [];
-  let i = 0, field = '', row = [], inQ = false;
-  function pushField(){ row.push(field); field=''; }
-  function pushRow(){ out.push(row); row=[]; }
-  while (i < csv.length) {
-    const c = csv[i++];
-    if (inQ) {
-      if (c === '"') {
-        if (csv[i] === '"'){ field += '"'; i++; } else { inQ = false; }
-      } else field += c;
-    } else {
-      if (c === '"') inQ = true;
-      else if (c === ',') pushField();
-      else if (c === '\n') { pushField(); pushRow(); }
-      else if (c === '\r') { /* ignore */ }
-      else field += c;
+  apiKeyIn.value = apiKey;
+  apiBaseSel.value = apiBase;
+
+  // ---------- Helpers ----------
+  function ok(msg='Done.'){ flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1200); }
+  function err(msg){ flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',4000); }
+
+  function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
+  function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
+  function saveMapping(){ localStorage.setItem('lf_mapping', JSON.stringify(mapping)); emitWidgetValue(); }
+
+  function getSource(id){ return sources.find(s=>s.id===id) || null; }
+  function allHeadersGrouped(){
+    // [{label:'[Contacts] Email', sourceId, column, rawLabel}]
+    const opts = [];
+    sources.forEach(s=>{
+      (s.headers||[]).forEach(h=>{
+        opts.push({ label:`[${s.name}] ${h}`, sourceId:s.id, column:h, rawLabel:h });
+      });
+    });
+    return opts;
+  }
+
+  function setActiveSource(id){
+    activeSourceId = id;
+    renderSourcesDropdown();
+    renderRowsList();
+  }
+
+  function pickRow(row){ selectedRow = row; renderPreviews(); }
+
+  function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
+
+  // ---------- CSV Fetch/Parse ----------
+  async function fetchCsv(url){
+    const res = await fetch(url, { mode:'cors' });
+    const text = await res.text();
+    const looksHtml = /^\s*</.test(text) && /<html|<head|<body/i.test(text);
+    if (!res.ok || looksHtml) throw new Error('CSV not accessible. Publish the sheet/tab as CSV (or use /export?format=csv&gid=).');
+    return parseCsvAuto(text);
+  }
+
+  function parseCsvAuto(raw){
+    const first = raw.split(/\r?\n/,1)[0]||'';
+    const candidates=[',',';','\t'];
+    let delim=',', best=0;
+    for(const d of candidates){
+      const c=(first.match(new RegExp(`\\${d}`,'g'))||[]).length;
+      if(c>best){best=c;delim=d;}
     }
+    return parseDelimited(raw,delim);
   }
-  if (field.length || row.length){ pushField(); pushRow(); }
 
-  const hdr = out.shift() || [];
-  const objs = out.map(r => {
-    const o = {};
-    hdr.forEach((h, idx) => o[h] = r[idx] ?? '');
-    return o;
-  });
-  return { headers: hdr, rows: objs };
-}
-
-function normalizeKey(s){ return String(s || '').toLowerCase().trim(); }
-
-function renderList() {
-  const keyField = els.keyCol.value || headers[0] || '';
-  const show = getSelectedShowColumns();
-  els.list.innerHTML = '';
-
-  const hr = document.createElement('div');
-  hr.className = 'row';
-  hr.innerHTML = `<div><b>${escapeHtml(keyField)}</b></div><div class="mini">(${rows.length} rows)</div>`;
-  hr.style.cursor='default';
-  els.list.appendChild(hr);
-
-  rows.forEach(r => {
-    const keyVal = String(r[keyField] ?? '').trim();
-    const sub = show.length ? show.map(h => r[h]).filter(Boolean).join(' • ') : '';
-    const div = document.createElement('div');
-    div.className = 'row';
-    div.innerHTML = `<div><div>${escapeHtml(keyVal || '(empty key)')}</div><div class="mini">${escapeHtml(sub)}</div></div><div class="pill">select</div>`;
-    div.addEventListener('click', () => selectRow(r));
-    els.list.appendChild(div);
-  });
-}
-
-function selectRow(r) {
-  selected = r;
-  els.useBtn.disabled = false;
-  renderDetails();
-}
-
-function renderDetails() {
-  if (!selected) { els.details.style.display = 'none'; return; }
-  els.details.style.display = '';
-
-  const kv = Object.entries(selected).map(([k,v]) => (
-    `<div class="kv"><div class="mini">${escapeHtml(k)}</div><div>${escapeHtml(v||'')}</div></div>`
-  )).join('');
-
-  const mappedObj = buildMapped(selected, mapping);
-  const mkv = Object.entries(mappedObj).map(([k,v]) => (
-    `<div class="kv"><div class="mini">${escapeHtml(k)}</div><div>${escapeHtml(v||'')}</div></div>`
-  )).join('') || '<div class="mini">(no mapping defined yet)</div>';
-
-  els.details.innerHTML = `
-    <div class="mini">Selected Row</div>
-    ${kv}
-    <div style="height:10px"></div>
-    <div class="mini">Mapped Preview</div>
-    ${mkv}
-  `;
-}
-
-function getSelectedShowColumns(){
-  return Array.from(els.showCols.selectedOptions).map(o => o.value);
-}
-
-function fillHeaderSelectors() {
-  els.keyCol.innerHTML = headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
-  const guess = headers.find(h => /email|id|code|key/i.test(h)) || headers[0] || '';
-  els.keyCol.value = guess;
-
-  els.showCols.innerHTML = headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
-  const defaults = headers.filter(h => /name|email|phone|status/i.test(h)).slice(0,3);
-  Array.from(els.showCols.options).forEach(o => { o.selected = defaults.includes(o.value); });
-  els.showCols.size = Math.min(6, Math.max(3, headers.length));
-}
-
-async function loadCsv(andSearch=false) {
-  try {
-    msg('');
-    const url = (els.csvUrl.value || '').trim();
-    if (!url) { msg('Enter a live CSV URL.'); return; }
-    const { headers: hdrs, rows: rs } = await fetchCsv(url);
-    headers = hdrs;
-    rows = rs;
-    if (!headers.length) { msg('No headers found in CSV.'); return; }
-    fillHeaderSelectors();
-    loadMappingForUrl(url); // hydrate mapping based on this URL
-    renderMapping();
-    if (andSearch && els.keyInput.value.trim()) {
-      doSearch();
-    } else {
-      renderList();
-    }
-  } catch (e) {
-    msg(`Load failed: ${e.message || e}`, false);
-  }
-}
-
-function doSearch() {
-  const keyField = els.keyCol.value;
-  const q = els.keyInput.value.trim();
-  if (!keyField) { msg('Choose a Key Column.'); return; }
-  const exact = rows.find(r => normalizeKey(r[keyField]) === normalizeKey(q));
-  if (exact) {
-    selectRow(exact);
-    rows = [exact, ...rows.filter(r => r !== exact)];
-  } else {
-    const list = rows.filter(r => normalizeKey(r[keyField]).includes(normalizeKey(q)));
-    if (!list.length) { msg('No matches. Showing all rows.'); }
-    rows = list.length ? list : rows;
-  }
-  renderList();
-}
-
-function sendToForm() {
-  if (!selected) { msg('Pick a row first.'); return; }
-  const mappedObj = buildMapped(selected, mapping);
-  const reqMissing = requiredMissing(selected, mapping);
-  if (reqMissing.length) {
-    msg(`Required mapping missing data: ${reqMissing.join(', ')}`); return;
-  }
-  const payload = {
-    spreadsheet: selected,
-    mapped: mappedObj,
-    mapping,
-    meta: { sourceUrl: (els.csvUrl.value||'').trim(), timestamp: Date.now() }
-  };
-  try {
-    JFCustomWidget.sendData({ value: JSON.stringify(payload) });
-    ok('Row sent to form. Use Conditions to copy values from "mapped.*" into your fields.');
-  } catch (_) {}
-}
-
-/* ========== Mapping ========== */
-const TRANSFORMS = ['none','trim','lowercase','uppercase','titlecase'];
-
-function titleCase(s){
-  return String(s||'').toLowerCase().replace(/\b([a-z])/g, (m,c)=>c.toUpperCase());
-}
-
-function applyTransform(v, t){
-  const s = String(v ?? '');
-  switch (t){
-    case 'trim': return s.trim();
-    case 'lowercase': return s.toLowerCase();
-    case 'uppercase': return s.toUpperCase();
-    case 'titlecase': return titleCase(s);
-    default: return s;
-  }
-}
-
-function buildMapped(row, mapArr){
-  const out = {};
-  for (const m of mapArr){
-    if (!m || !m.source || !m.target) continue;
-    const raw = row[m.source];
-    out[m.target] = applyTransform(raw, m.transform || 'none');
-  }
-  return out;
-}
-
-function requiredMissing(row, mapArr){
-  const miss = [];
-  for (const m of mapArr){
-    if (m.required && (!row[m.source] || String(row[m.source]).trim() === '')) {
-      miss.push(m.target || m.source);
-    }
-  }
-  return miss;
-}
-
-function renderMapping(){
-  els.mapBody.innerHTML = '';
-  mapping.forEach((m, idx)=>{
-    const tr = document.createElement('tr');
-
-    // Source select
-    const tdSource = document.createElement('td');
-    const sel = document.createElement('select');
-    sel.innerHTML = headers.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
-    if (!headers.includes(m.source)) m.source = headers[0] || '';
-    sel.value = m.source;
-    sel.addEventListener('change', ()=>{ m.source = sel.value; persistMapping(); renderDetails(); });
-    tdSource.appendChild(sel);
-
-    // Target input
-    const tdTarget = document.createElement('td');
-    const t = document.createElement('input');
-    t.type = 'text'; t.placeholder = 'Target name (for Jotform Conditions)';
-    t.value = m.target || '';
-    t.addEventListener('input', ()=>{ m.target = t.value; persistMapping(); renderDetails(); });
-    tdTarget.appendChild(t);
-
-    // Transform select
-    const tdX = document.createElement('td');
-    const ts = document.createElement('select');
-    ts.innerHTML = TRANSFORMS.map(x=>`<option value="${x}">${x}</option>`).join('');
-    ts.value = m.transform || 'none';
-    ts.addEventListener('change', ()=>{ m.transform = ts.value; persistMapping(); renderDetails(); });
-    tdX.appendChild(ts);
-
-    // Required checkbox
-    const tdReq = document.createElement('td');
-    const c = document.createElement('input'); c.type='checkbox'; c.checked = !!m.required;
-    c.addEventListener('change', ()=>{ m.required = c.checked; persistMapping(); });
-    tdReq.appendChild(c);
-
-    // Remove
-    const tdDel = document.createElement('td');
-    const del = document.createElement('button'); del.textContent = 'Delete'; del.className='danger';
-    del.addEventListener('click', ()=>{ mapping.splice(idx,1); persistMapping(); renderMapping(); renderDetails(); });
-    tdDel.appendChild(del);
-
-    tr.appendChild(tdSource); tr.appendChild(tdTarget); tr.appendChild(tdX); tr.appendChild(tdReq); tr.appendChild(tdDel);
-    els.mapBody.appendChild(tr);
-  });
-
-  // status
-  els.mapStatus.textContent = mapping.length ? `${mapping.length} mapping${mapping.length>1?'s':''}` : 'No mappings yet';
-}
-
-function addMappingRow(){
-  const guess = headers.find(h => /email|name|phone/i.test(h)) || headers[0] || '';
-  mapping.push({ source: guess, target: guess, required:false, transform:'none' });
-  persistMapping();
-  renderMapping();
-  renderDetails();
-}
-
-function autoMap(){
-  if (!headers.length) return;
-  const guesses = [
-    { rx:/^email/i, target:'Client Email' },
-    { rx:/^full\s*name|^name$/i, target:'Client Name' },
-    { rx:/^first/i, target:'First Name' },
-    { rx:/^last/i, target:'Last Name' },
-    { rx:/phone|mobile|cell/i, target:'Phone' },
-    { rx:/company|employer/i, target:'Company' },
-    { rx:/address/i, target:'Address' }
-  ];
-  const newMaps = [];
-  for (const h of headers){
-    const g = guesses.find(g => g.rx.test(h));
-    if (g) newMaps.push({ source:h, target:g.target, required:false, transform:'none' });
-  }
-  if (!newMaps.length){ msg('No obvious matches to auto-map.'); return; }
-  // merge without duplicating targets
-  const existingTargets = new Set(mapping.map(m=>m.target));
-  for (const m of newMaps){ if (!existingTargets.has(m.target)) mapping.push(m); }
-  persistMapping();
-  renderMapping();
-  renderDetails();
-  ok('Auto-mapped likely fields.');
-}
-
-function exportMapping(){
-  const blob = new Blob([JSON.stringify(mapping, null, 2)], {type:'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'mapping.json';
-  document.body.appendChild(a); a.click();
-  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
-}
-
-function importMapping(){
-  const inp = document.createElement('input'); inp.type='file'; inp.accept='application/json';
-  inp.addEventListener('change', async ()=>{
-    const f = inp.files?.[0]; if (!f) return;
-    try {
-      const text = await f.text();
-      const arr = JSON.parse(text);
-      if (!Array.isArray(arr)) throw new Error('JSON must be an array');
-      // sanitize
-      mapping = arr.map(m => ({
-        source: String(m.source || ''),
-        target: String(m.target || ''),
-        required: !!m.required,
-        transform: TRANSFORMS.includes(m.transform) ? m.transform : 'none'
-      })).filter(m => m.source && m.target);
-      persistMapping();
-      renderMapping();
-      renderDetails();
-      ok('Mapping imported.');
-    } catch (e){
-      msg(`Import failed: ${e.message || e}`);
-    }
-  });
-  inp.click();
-}
-
-function persistMapping(){
-  const key = mapStorageKey((els.csvUrl.value||'').trim());
-  if (key) {
-    try { localStorage.setItem(key, JSON.stringify(mapping)); } catch(_) {}
-  }
-}
-
-function loadMappingForUrl(url){
-  // Preference: widget setting MappingJSON, else localStorage per URL
-  const fromSettings = (SETTINGS.MappingJSON || '').trim();
-  if (fromSettings) {
-    try {
-      const arr = JSON.parse(fromSettings);
-      if (Array.isArray(arr)) { mapping = sanitizeMapping(arr); return; }
-    } catch(_) {}
-  }
-  const key = mapStorageKey(url);
-  let arr = [];
-  try {
-    arr = JSON.parse(localStorage.getItem(key) || '[]');
-  } catch(_) {}
-  mapping = sanitizeMapping(arr);
-}
-
-function sanitizeMapping(arr){
-  return (Array.isArray(arr) ? arr : []).map(m => ({
-    source: headers.includes(m.source) ? m.source : (headers[0] || ''),
-    target: String(m.target || ''),
-    required: !!m.required,
-    transform: TRANSFORMS.includes(m.transform) ? m.transform : 'none'
-  })).filter(m => m.source && m.target);
-}
-
-function mapStorageKey(url){
-  if (!url) return null;
-  try { return 'map::' + btoa(url); } catch(_) { return 'map::' + encodeURIComponent(url); }
-}
-
-function wire() {
-  els.reloadBtn.addEventListener('click', () => loadCsv(false));
-  els.searchBtn.addEventListener('click', () => doSearch());
-  els.keyCol.addEventListener('change', () => renderList());
-  els.showCols.addEventListener('change', () => renderList());
-  els.useBtn.addEventListener('click', () => sendToForm());
-
-  els.addMap.addEventListener('click', addMappingRow);
-  els.autoMap.addEventListener('click', autoMap);
-  els.exportMap.addEventListener('click', exportMapping);
-  els.importMap.addEventListener('click', importMapping);
-}
-
-/* ========== Jotform lifecycle ========== */
-JFCustomWidget.subscribe('ready', function(formData){
-  SETTINGS = JFCustomWidget.getWidgetSettings() || {};
-  const presetUrl = SETTINGS.DataUrl || '';
-  const presetKey = SETTINGS.KeyColumn || '';
-  if (presetUrl) els.csvUrl.value = presetUrl;
-  wire();
-  if (presetUrl) {
-    loadCsv(true).then(() => {
-      if (presetKey && headers.includes(presetKey)) {
-        els.keyCol.value = presetKey;
-        renderList();
+  function parseDelimited(text,delim){
+    const out=[]; let i=0, field='', row=[], inQ=false; const N=text.length;
+    const pushF=()=>{ row.push(field); field=''; };
+    const pushR=()=>{ out.push(row); row=[]; };
+    while(i<N){
+      const c=text[i++];
+      if(inQ){
+        if(c==='"'){ if(text[i]==='"'){ field+='"'; i++; } else { inQ=false; } }
+        else field+=c;
+      }else{
+        if(c==='"') inQ=true;
+        else if(c==='\r'){/*skip*/}
+        else if(c==='\n'){ pushF(); pushR(); }
+        else if(c===delim){ pushF(); }
+        else field+=c;
       }
+    }
+    if(field.length||row.length){ pushF(); pushR(); }
+    const headers=(out.shift()||[]).map(h=>(h||'').trim());
+    const rows=out
+      .filter(r=>r.some(cell=>String(cell||'').trim().length))
+      .map(r=>{ const o={}; headers.forEach((h,idx)=>o[h]=r[idx]??''); return o; });
+    return { headers, rows };
+  }
+
+  async function loadSourceData(s){
+    const { headers, rows } = await fetchCsv(s.url);
+    s.headers = headers;
+    s.rows = rows;
+    // if keyCol missing, guess common ones
+    if(!s.keyCol){
+      const guess = headers.find(h=>/^(email|id|code)$/i.test(h)) || headers[0];
+      s.keyCol = guess;
+    }
+    saveSources();
+  }
+
+  // ---------- Jotform API ----------
+  async function getQuestions(){
+    if(!apiKey) throw new Error('Paste an API key or Login first.');
+    if(!formId) throw new Error('Form ID not available.');
+    const url = `${apiBase}/form/${formId}/questions?apiKey=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url, { mode:'cors' });
+    if(!resp.ok) throw new Error(`Questions fetch failed: ${resp.status}`);
+    const json = await resp.json();
+    const map = json.content || {};
+    questions = Object.keys(map).map(qid=>({
+      qid,
+      label: map[qid].text || '',
+      type: map[qid].type || '',
+      name: map[qid].name || '',
+      order: map[qid].order || 0
+    })).sort((a,b)=>a.order - b.order);
+  }
+
+  function buildSubmissionBody(rowBySource){
+    // rowBySource: { [sourceId]: selectedRowObj }
+    // mapping: { [qid]: { sourceId, column } }
+    // For now: simple fields => submission[qid] = row[column]
+    const data=new URLSearchParams();
+    Object.keys(mapping).forEach(qid=>{
+      const m = mapping[qid]; if(!m) return;
+      const r = rowBySource[m.sourceId]; if(!r) return;
+      const val = r[m.column] ?? '';
+      data.append(`submission[${qid}]`, val);
+    });
+    return data;
+  }
+
+  async function createSubmission(body){
+    if(!apiKey) throw new Error('Paste an API key or Login first.');
+    if(!formId) throw new Error('Form ID not available.');
+    const url = `${apiBase}/form/${formId}/submissions?apiKey=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
+    if(!resp.ok) throw new Error(`Create submission failed: ${resp.status}`);
+    const json=await resp.json();
+    const c = json.content || {};
+    const sid = c.id || c.submissionID || c.sid || null;
+    if(!sid) throw new Error('Submission created but ID not found.');
+    return String(sid);
+  }
+
+  // ---------- UI: Auth ----------
+  JFCustomWidget.subscribe('ready', payload=>{
+    formId = payload && payload.formId ? String(payload.formId) : null;
+    formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+    renderSourcesDropdown();
+    renderRowsList();
+    renderMappingTable();
+    emitWidgetValue(); // push current saved config to parent
+  });
+
+  loginBtn.addEventListener('click', ()=>{
+    JF.login(()=>{
+      try{
+        const k = JF.getAPIKey();
+        if(k){ apiKey = k; apiKeyIn.value = k; localStorage.setItem('lf_apiKey', apiKey); ok('Authorized.'); }
+        else err('Login ok, but API key not returned.');
+      }catch(e){ err('Login ok, but API key not returned.'); }
+    }, ()=> err('Login failed or canceled.'));
+  });
+
+  saveKey.addEventListener('click', ()=>{
+    apiKey = apiKeyIn.value.trim();
+    apiBase = apiBaseSel.value;
+    localStorage.setItem('lf_apiKey', apiKey);
+    localStorage.setItem('lf_apiBase', apiBase);
+    ok('Saved.');
+  });
+
+  loadFields.addEventListener('click', async ()=>{
+    try{
+      await getQuestions();
+      renderMappingTable();
+      ok('Questions loaded.');
+    }catch(e){ err(e.message||'Failed to load questions.'); }
+  });
+
+  // ---------- UI: Sources ----------
+  function renderSourcesDropdown(){
+    activeSource.innerHTML = '';
+    if(!sources.length){
+      activeSource.appendChild(new Option('— no sources —',''));
+      return;
+    }
+    sources.forEach(s=>{
+      const o=new Option(`${s.name} ${s.headers?`(${s.rows?.length||0})`:''}`, s.id);
+      activeSource.appendChild(o);
+    });
+    if(!activeSourceId || !getSource(activeSourceId)) activeSourceId = sources[0].id;
+    activeSource.value = activeSourceId;
+  }
+
+  addSource.addEventListener('click', async ()=>{
+    const name = (srcName.value||'').trim();
+    const url = (srcUrl.value||'').trim();
+    const keyCol = (srcKeyCol.value||'').trim();
+    if(!name || !url){ err('Enter a tab name and CSV URL.'); return; }
+    const s = { id:uid(), name, url, keyCol:keyCol||null, headers:null, rows:null };
+    sources.push(s); saveSources();
+    try{
+      await loadSourceData(s);
+      activeSourceId = s.id; renderSourcesDropdown(); renderRowsList(); renderMappingTable();
+      ok('Source added.');
+    }catch(e){
+      err(e.message||'Failed to load CSV.');
+    }
+  });
+
+  activeSource.addEventListener('change', ()=> setActiveSource(activeSource.value));
+
+  btnReloadCsv.addEventListener('click', async ()=>{
+    const s = getSource(activeSourceId); if(!s) return;
+    try{ await loadSourceData(s); renderRowsList(); renderMappingTable(); ok('CSV reloaded.'); }
+    catch(e){ err(e.message||'Reload failed.'); }
+  });
+
+  btnSearch.addEventListener('click', ()=> renderRowsList());
+
+  lookupVal.addEventListener('keydown', e=>{
+    if(e.key==='Enter') renderRowsList();
+  });
+
+  function renderRowsList(){
+    const s = getSource(activeSourceId);
+    rowsList.innerHTML = '';
+    if(!s){ rowsList.innerHTML='<div class="mini">Pick or add a source.</div>'; return; }
+    if(!s.headers){ rowsList.innerHTML='<div class="mini">No data loaded yet. Click “Reload CSV”.</div>'; return; }
+
+    const q = (lookupVal.value||'').toLowerCase().trim();
+    const keyCol = s.keyCol && s.headers.includes(s.keyCol) ? s.keyCol : s.headers[0];
+
+    const subset = (s.rows||[]).filter(r=>{
+      if(!q) return true;
+      const v = String(r[keyCol]??'').toLowerCase();
+      return v.includes(q);
+    }).slice(0,200); // cap display
+
+    const tbl=document.createElement('table');
+    const thead=document.createElement('thead'), tbody=document.createElement('tbody');
+
+    const trh=document.createElement('tr');
+    s.headers.slice(0,6).forEach(h=>{
+      const th=document.createElement('th'); th.textContent=h; trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+
+    subset.forEach(r=>{
+      const tr=document.createElement('tr'); tr.style.cursor='pointer';
+      s.headers.slice(0,6).forEach(h=>{
+        const td=document.createElement('td'); td.textContent = r[h];
+        tr.appendChild(td);
+      });
+      tr.addEventListener('click', ()=>{ pickRow({ __sourceId:s.id, ...r }); ok('Row selected.'); });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    rowsList.appendChild(tbl);
+
+    if(!subset.length){
+      const d=document.createElement('div'); d.className='mini';
+      d.textContent = q ? `No matches for "${lookupVal.value}" in ${keyCol}.` : 'No rows found.';
+      rowsList.appendChild(d);
+    }
+  }
+
+  // ---------- UI: Mapping ----------
+  function renderMappingTable(){
+    mapTableBody.innerHTML='';
+    if(!questions.length){
+      mapTableBody.innerHTML='<tr><td colspan="3" class="muted">Load Jotform questions first.</td></tr>';
+      return;
+    }
+    const grouped = {}; // sourceId -> [columns]
+    sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
+
+    questions.forEach(q=>{
+      // Filter to common types first; you can loosen this if you want all
+      const supported = true; // let’s allow mapping to any QID; advanced types can be enhanced later
+      if(!supported) return;
+
+      const tr=document.createElement('tr');
+      const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
+      const td2=document.createElement('td'); td2.textContent = q.qid;
+      const td3=document.createElement('td');
+
+      const sel=document.createElement('select');
+      sel.innerHTML = `<option value="">— no mapping —</option>`;
+      Object.keys(grouped).forEach(sid=>{
+        const s = getSource(sid); if(!s || !s.headers) return;
+        const og = document.createElement('optgroup'); og.label = `${s.name}`;
+        grouped[sid].forEach(o=>{
+          const opt=document.createElement('option');
+          opt.value = JSON.stringify({ sourceId:sid, column:o.column });
+          opt.textContent = o.column;
+          og.appendChild(opt);
+        });
+        sel.appendChild(og);
+      });
+
+      // restore saved mapping
+      if(mapping[q.qid]){
+        sel.value = JSON.stringify(mapping[q.qid]);
+      }
+
+      sel.addEventListener('change', ()=>{
+        if(!sel.value){ delete mapping[q.qid]; }
+        else mapping[q.qid] = JSON.parse(sel.value);
+        saveMapping();
+        renderPreviews();
+      });
+
+      td3.appendChild(sel);
+      tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+      mapTableBody.appendChild(tr);
     });
   }
-});
 
-JFCustomWidget.subscribe('submit', function(){
-  const mappedObj = selected ? buildMapped(selected, mapping) : {};
-  const reqMissing = selected ? requiredMissing(selected, mapping) : [];
-  const valid = !!selected && reqMissing.length === 0;
-  const value = JSON.stringify({
-    spreadsheet: selected || null,
-    mapped: mappedObj,
-    mapping,
-    meta: { sourceUrl: (els.csvUrl.value||'').trim(), timestamp: Date.now() }
+  clearMap.addEventListener('click', ()=>{
+    mapping = {};
+    saveMapping();
+    renderMappingTable();
+    renderPreviews();
   });
-  JFCustomWidget.sendSubmit({ valid, value });
-});
 
-/* ========== helpers ========== */
-function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+  autoMap.addEventListener('click', ()=>{
+    // naive: match question label → column (case-insensitive exact)
+    const colsByLower = {};
+    sources.forEach(s=>{
+      (s.headers||[]).forEach(h=>{
+        const key = h.toLowerCase();
+        if(!colsByLower[key]) colsByLower[key] = [];
+        colsByLower[key].push({ sourceId:s.id, column:h });
+      });
+    });
+    questions.forEach(q=>{
+      const k = (q.label||'').toLowerCase().trim();
+      const cand = colsByLower[k] && colsByLower[k][0];
+      if(cand) mapping[q.qid] = cand;
+    });
+    saveMapping();
+    renderMappingTable();
+    renderPreviews();
+    ok('Auto-mapped where labels matched.');
+  });
+
+  // ---------- Preview & Submit ----------
+  function renderPreviews(){
+    // Selected row may belong to one source. But mapping can reference multiple sources.
+    // Build a per-source selected row object: use the clicked row for its source; for other sources, pick first row or none.
+    const rowBySource = {};
+
+    if(selectedRow && selectedRow.__sourceId){
+      rowBySource[selectedRow.__sourceId] = selectedRow;
+    }
+    // If a mapping references other sources and we don't have a picked row there, just leave undefined.
+    // (You could enhance to let user pick a row per source.)
+
+    // Row preview = the clicked row only
+    rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
+
+    // Payload preview
+    const preview = {};
+    Object.keys(mapping).forEach(qid=>{
+      const m = mapping[qid];
+      const r = rowBySource[m.sourceId];
+      if(r) preview[`submission[${qid}]`] = r[m.column] ?? '';
+    });
+    payloadPreview.textContent = Object.keys(preview).length ? JSON.stringify(preview, null, 2) : '(no mapped values or no selected row)';
+  }
+
+  createSubmit.addEventListener('click', async ()=>{
+    try{
+      if(!selectedRow){ err('Pick a row first.'); return; }
+      // We only have a row for its source; any mappings for other sources will be skipped in this minimal flow.
+      const rowBySource = { [selectedRow.__sourceId]: selectedRow };
+      const body = buildSubmissionBody(rowBySource);
+      const sid = await createSubmission(body);
+      const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
+      resultBox.innerHTML = `<div class="ok" style="display:block">Created submission <b>${sid}</b>. <a href="${editUrl}" target="_top" rel="noopener">Open Edit Page</a></div>`;
+      try{ window.top.location.href = editUrl; }catch(_){}
+    }catch(e){ err(e.message||'Failed to create submission.'); }
+  });
+
+  // ---------- Widget value emitter (so you can capture config in the form) ----------
+  const emit = debounce(()=>{
+    const payload = {
+      formId,
+      apiBase,
+      sources: sources.map(s=>({ id:s.id, name:s.name, url:s.url, keyCol:s.keyCol, headers:s.headers || [], rowsCount:(s.rows||[]).length })),
+      mapping,
+      selectedRow: selectedRow ? { sourceId:selectedRow.__sourceId, row:selectedRow } : null
+    };
+    try{ JFCustomWidget.sendData({ value: JSON.stringify(payload) }); }catch(_){}
+  }, 600);
+
+  function emitWidgetValue(){ emit(); }
+
+  // re-emit on notable changes
+  window.addEventListener('storage', emitWidgetValue);
+
+  // ---------- Kick things off ----------
+  function boot(){
+    renderSourcesDropdown();
+    renderRowsList();
+    renderMappingTable();
+    renderPreviews();
+  }
+  boot();
+})();

@@ -189,24 +189,46 @@
   async function getQuestions(){
     if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
+  
     const url = `${apiBase}/form/${formId}/questions?apiKey=${encodeURIComponent(apiKey)}`;
     const resp = await fetch(url, { mode:'cors' });
     if(!resp.ok) throw new Error(`Questions fetch failed: ${resp.status}`);
     const json = await resp.json();
     const map = json.content || {};
-
-    // Build enhanced questions array
-    questions = Object.keys(map).map(qid=>{
-      const raw = map[qid] || {};
-      const type = raw.type || '';
-      const label = raw.text || '';
-      const order = raw.order || 0;
-      const staticQ = isStaticType(type);
-      const choices = hasChoices(type) ? extractChoicesFromRaw(raw) : [];
-      const multi = allowsMultiple(type);
-      return { qid, label, type, name: raw.name || '', order, raw, isStatic: staticQ, choices, allowsMultiple: multi };
-    }).filter(q => !q.isStatic) // <-- Hide static fields from mapping
-      .sort((a,b)=>a.order - b.order);
+  
+    // types to EXCLUDE from mapping (static / widget / layout)
+    const EXCLUDE = new Set([
+      'control_head','control_text','control_image','control_button',
+      'control_pagebreak','control_collapse','control_widget'
+    ]);
+  
+    // choice types we’ll add fixed values for
+    const CHOICE_TYPES = new Set([
+      'control_dropdown','control_radio','control_checkbox'
+    ]);
+  
+    questions = Object.keys(map).map(qid => {
+      const q = map[qid] || {};
+      const type = q.type || '';
+      const label = q.text || '';
+      // parse options if any (Jotform usually pipes options, e.g. "A|B|C")
+      const choices = CHOICE_TYPES.has(type)
+        ? String(q.options || '')
+            .split('|')
+            .map(s => s.trim())
+            .filter(Boolean)
+        : [];
+      return {
+        qid,
+        label,
+        type,
+        name: q.name || '',
+        order: q.order || 0,
+        choices
+      };
+    })
+    .filter(q => !EXCLUDE.has(q.type)) // drop static/widget types
+    .sort((a,b)=>a.order - b.order);
   }
 
   // Normalize a value for choice questions (respect allowed choices; support multi via comma/semicolon/pipe)
@@ -233,19 +255,70 @@
 
   // ---------- Submission build/post ----------
   function buildSubmissionBody(rowBySource){
-    const data=new URLSearchParams();
+    const data = new URLSearchParams();
+  
     Object.keys(mapping).forEach(qid=>{
       const m = mapping[qid]; if(!m) return;
-      const r = rowBySource[m.sourceId]; if(!r) return;
-
-      const q = questions.find(qq => qq.qid === qid);
-      const rawVal = r[m.column] ?? '';
-
-      const val = q ? normalizeChoiceValue(q, rawVal) : rawVal;
-      data.append(`submission[${qid}]`, val);
+  
+      if (m.kind === 'sheet') {
+        const r = rowBySource[m.sourceId]; if(!r) return;
+        const val = r[m.column] ?? '';
+        data.append(`submission[${qid}]`, val);
+        return;
+      }
+  
+      if (m.kind === 'fixed') {
+        data.append(`submission[${qid}]`, m.value ?? '');
+        return;
+      }
+  
+      if (m.kind === 'fixedMulti') {
+        const arr = Array.isArray(m.values) ? m.values : [];
+        // Jotform checkboxes accept comma-separated values
+        data.append(`submission[${qid}]`, arr.join(', '));
+        return;
+      }
+  
+      if (m.kind === 'text') {
+        data.append(`submission[${qid}]`, m.value ?? '');
+        return;
+      }
     });
+  
     return data;
   }
+  
+  createSubmit && createSubmit.addEventListener('click', async ()=>{
+    if(!selectedRow){ err('Pick a row first.'); return; }
+  
+    createSubmit.disabled = true;
+    const originalLabel = createSubmit.textContent;
+    createSubmit.textContent = 'Creating…';
+  
+    try{
+      const rowBySource = { [selectedRow.__sourceId]: selectedRow };
+      const body = buildSubmissionBody(rowBySource);
+      const sid = await createSubmission(body);
+      const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
+  
+      if (resultBox) {
+        resultBox.innerHTML = `
+          <div class="ok" style="display:block">
+            Created submission <b>${sid}</b>.
+            <a href="${editUrl}" target="_blank" rel="noopener">Open Edit Page</a>
+          </div>`;
+      }
+  
+      // Try opening in a new tab and also attempt top redirect (may be blocked by sandbox; new tab is safer)
+      try { window.open(editUrl, '_blank', 'noopener'); } catch(_) {}
+      try { window.top.location.href = editUrl; } catch(_) {} // harmless if blocked
+    }catch(e){
+      err(e.message || 'Failed to create submission.');
+    }finally{
+      createSubmit.disabled = false;
+      createSubmit.textContent = originalLabel;
+    }
+  });
 
   async function createSubmission(body){
     if(!apiKey) throw new Error('Paste an API key or Login first.');
@@ -467,64 +540,195 @@
   function renderMappingTable(){
     if(!mapTableBody) return;
     mapTableBody.innerHTML='';
+  
     if(!questions.length){
       mapTableBody.innerHTML='<tr><td colspan="3" class="muted">Load Jotform questions first.</td></tr>';
       return;
     }
+  
+    // group sheet columns per source
     const grouped = {}; // sourceId -> [columns]
-    sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
-
+    sources.forEach(s => grouped[s.id] = (s.headers||[]).map(h => ({ column:h, source:s })) );
+  
     questions.forEach(q=>{
-      // q.isStatic already filtered in getQuestions; keep guard if needed:
-      if (q.isStatic) return;
-
       const tr=document.createElement('tr');
-      const td1=document.createElement('td');
-      const labelEl = document.createElement('div');
-      labelEl.textContent = `${q.label} (${q.type.replace('control_','')})`;
-      td1.appendChild(labelEl);
-
-      if (q.choices && q.choices.length) {
-        // show available choices inline (read-only)
-        const pills = document.createElement('div');
-        pills.className = 'mini';
-        pills.style.marginTop = '4px';
-        pills.textContent = `Choices: ${q.choices.join(' • ')}`;
-        td1.appendChild(pills);
-      }
-
+  
+      const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
       const td2=document.createElement('td'); td2.textContent = q.qid;
       const td3=document.createElement('td');
-
+  
       const sel=document.createElement('select');
+      sel.style.minWidth = '260px';
+  
+      // default
       sel.innerHTML = `<option value="">— no mapping —</option>`;
+  
+      // From Sheets (optgroups by source)
       Object.keys(grouped).forEach(sid=>{
         const s = getSource(sid); if(!s || !s.headers) return;
-        const og = document.createElement('optgroup'); og.label = `${s.name}`;
+        const og = document.createElement('optgroup'); og.label = `From Sheets — ${s.name}`;
         grouped[sid].forEach(o=>{
           const opt=document.createElement('option');
-          opt.value = JSON.stringify({ sourceId:sid, column:o.column });
+          opt.value = JSON.stringify({ kind:'sheet', sourceId:sid, column:o.column });
           opt.textContent = o.column;
           og.appendChild(opt);
         });
         sel.appendChild(og);
       });
-
-      if(mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
-
+  
+      // Fixed values from the form’s own choices (if applicable)
+      if ((q.choices||[]).length) {
+        const og = document.createElement('optgroup');
+        og.label = 'Fixed values — Form choices';
+        q.choices.forEach(choice=>{
+          const opt=document.createElement('option');
+          opt.value = JSON.stringify({ kind:'fixed', value:choice });
+          opt.textContent = choice;
+          og.appendChild(opt);
+        });
+  
+        // If multi-select allowed (checkbox), add a special "Multiple…" option
+        if (q.type === 'control_checkbox') {
+          const multiOpt = document.createElement('option');
+          multiOpt.value = JSON.stringify({ kind:'fixedMultiPrompt' });
+          multiOpt.textContent = 'Multiple…';
+          og.appendChild(multiOpt);
+        }
+  
+        sel.appendChild(og);
+      }
+  
+      // "Other…" free-entry option (always available)
+      {
+        const og = document.createElement('optgroup');
+        og.label = 'Custom';
+        const otherOpt = document.createElement('option');
+        otherOpt.value = JSON.stringify({ kind:'textPrompt' });
+        otherOpt.textContent = 'Other… (type in a custom value)';
+        og.appendChild(otherOpt);
+        sel.appendChild(og);
+      }
+  
+      // restore saved mapping
+      if(mapping[q.qid]){
+        sel.value = JSON.stringify(mapping[q.qid]);
+      }
+  
+      // inline editor area for multi/other (appears when chosen)
+      const inlineWrap = document.createElement('div');
+      inlineWrap.style.marginTop = '6px';
+      inlineWrap.style.display = 'none';
+  
+      function showInlineEditor(config){
+        inlineWrap.innerHTML = '';
+        inlineWrap.style.display = 'block';
+  
+        if (config.kind === 'text') {
+          // single free-text
+          const inp = document.createElement('input');
+          inp.type = 'text';
+          inp.placeholder = 'Enter custom value…';
+          inp.style.minWidth = '260px';
+          inp.value = config.value || '';
+          inlineWrap.appendChild(inp);
+  
+          const saveBtn = document.createElement('button');
+          saveBtn.textContent = 'Save';
+          saveBtn.className = 'btn';
+          saveBtn.style.marginLeft = '6px';
+          inlineWrap.appendChild(saveBtn);
+  
+          saveBtn.addEventListener('click', ()=>{
+            mapping[q.qid] = { kind:'text', value: inp.value || '' };
+            saveMapping();
+            // reflect in <select> too
+            sel.value = JSON.stringify(mapping[q.qid]);
+            ok('Saved.');
+          });
+        }
+  
+        if (config.kind === 'fixedMulti') {
+          // multi-choice chooser (checkboxes)
+          const choices = q.choices || [];
+          if (!choices.length) {
+            inlineWrap.textContent = 'This field has no defined choices.';
+            return;
+          }
+  
+          const holder = document.createElement('div');
+          holder.style.display = 'grid';
+          holder.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
+          holder.style.gap = '4px';
+  
+          const selected = new Set(config.values || []);
+          choices.forEach(ch=>{
+            const lab = document.createElement('label');
+            lab.style.display = 'flex'; lab.style.alignItems = 'center'; lab.style.gap = '6px';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = selected.has(ch);
+            cb.addEventListener('change', ()=> {
+              if (cb.checked) selected.add(ch); else selected.delete(ch);
+            });
+            lab.appendChild(cb);
+            lab.appendChild(document.createTextNode(ch));
+            holder.appendChild(lab);
+          });
+          inlineWrap.appendChild(holder);
+  
+          const saveBtn = document.createElement('button');
+          saveBtn.textContent = 'Save';
+          saveBtn.className = 'btn';
+          saveBtn.style.marginTop = '6px';
+          inlineWrap.appendChild(saveBtn);
+  
+          saveBtn.addEventListener('click', ()=>{
+            mapping[q.qid] = { kind:'fixedMulti', values: Array.from(selected) };
+            saveMapping();
+            sel.value = JSON.stringify(mapping[q.qid]);
+            ok('Saved.');
+          });
+        }
+      }
+  
       sel.addEventListener('change', ()=>{
-        if(!sel.value){ delete mapping[q.qid]; }
-        else mapping[q.qid] = JSON.parse(sel.value);
+        if(!sel.value){
+          delete mapping[q.qid];
+          inlineWrap.style.display = 'none';
+          saveMapping();
+          renderPreviews();
+          return;
+        }
+  
+        const chosen = JSON.parse(sel.value);
+  
+        // trigger prompts/editors
+        if (chosen.kind === 'textPrompt') {
+          inlineWrap.style.display = 'block';
+          showInlineEditor({ kind:'text', value: '' });
+          return;
+        }
+        if (chosen.kind === 'fixedMultiPrompt') {
+          inlineWrap.style.display = 'block';
+          showInlineEditor({ kind:'fixedMulti', values: [] });
+          return;
+        }
+  
+        // normal selections (sheet column or single fixed choice)
+        mapping[q.qid] = chosen;
+        inlineWrap.style.display = 'none';
         saveMapping();
         renderPreviews();
       });
-
+  
       td3.appendChild(sel);
+      td3.appendChild(inlineWrap);
+  
       tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
       mapTableBody.appendChild(tr);
     });
   }
-
+  
   clearMap && clearMap.addEventListener('click', ()=>{
     mapping = {};
     saveMapping();

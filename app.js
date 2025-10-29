@@ -26,6 +26,9 @@
   let questions = []; // [{qid,label,type,name,order, options?:[], allowOther?:bool}]
   let activeSourceId = sources[0]?.id || null;
 
+  // mapping collapse persisted state
+  let mapCollapsed = (localStorage.getItem('lf_mapCollapsed') || 'false') === 'true';
+
   // question types to exclude (static/widget/system)
   const EXCLUDE_TYPES = new Set([
     'control_head','control_text','control_image','control_button',
@@ -50,8 +53,11 @@
   const rowsList = $('rowsList');
   const selectedHint = $('selectedHint'), selectedChips = $('selectedChips');
 
+  const mappingCard = $('mappingCard');
   const mapTableBody = document.querySelector('#mapTable tbody');
   const clearMap = $('clearMap'), autoMap = $('autoMap');
+  const toggleMap = $('toggleMap');
+  const mapSummary = $('mapSummary');
 
   const rowPreview = $('rowPreview'), payloadPreview = $('payloadPreview');
   const prefillBtn = $('prefillBtn'), resultBox = $('resultBox');
@@ -66,8 +72,9 @@
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
-  function saveMapping(){ localStorage.setItem('lf_mapping_v2', JSON.stringify(mapping)); emitWidgetValue(); }
+  function saveMapping(){ localStorage.setItem('lf_mapping_v2', JSON.stringify(mapping)); emitWidgetValue(); updateMapSummary(); }
   function saveSelections(){ localStorage.setItem('lf_selectedRows', JSON.stringify(selectedRows)); emitWidgetValue(); }
+  function saveMapCollapsed(){ localStorage.setItem('lf_mapCollapsed', String(mapCollapsed)); }
 
   function getSource(id){ return sources.find(s=>s.id===id) || null; }
   function setActiveSource(id){ activeSourceId = id; renderSourcesDropdown(); renderRowsList(); }
@@ -168,7 +175,6 @@
 
     questions = Object.keys(map).map(qid=>{
       const q = map[qid] || {};
-      // collect choices for choice controls
       let opts = [];
       if (q.options && typeof q.options === 'string'){
         opts = q.options.split('|').map(s=>s.trim()).filter(Boolean);
@@ -184,7 +190,7 @@
         options: opts,
         allowOther: !!q.allowOther
       };
-    }).filter(q => !EXCLUDE_TYPES.has(q.type)) // hide static/widget fields
+    }).filter(q => !EXCLUDE_TYPES.has(q.type))
       .sort((a,b)=>a.order - b.order);
   }
 
@@ -194,6 +200,7 @@
     if (formIdLabel) {
       formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available — paste it & Save.';
     }
+    applyMapCollapsed();
     renderSourcesDropdown();
     renderRowsList();
     renderSelectedHint();
@@ -251,7 +258,6 @@
     const keyCol= (srcKeyCol?.value || '').trim();
     if (!name || !url) { err('Enter a tab name and CSV URL.'); return; }
 
-    // Update existing by URL, else create
     const existing = sources.find(x => x.url === url);
     if (existing) {
       existing.name = name;
@@ -288,15 +294,12 @@
     if (!s) { err('No source selected.'); return; }
     if (!confirm(`Remove source "${s.name}"? This also clears mappings using it.`)) return;
 
-    // remove source
     sources = sources.filter(x => x.id !== s.id);
 
-    // clear mappings referencing it
     Object.keys(mapping).forEach(qid => {
       if (mapping[qid]?.sourceId === s.id) delete mapping[qid];
     });
 
-    // clear selected rows referencing it
     if (selectedRows[s.id]) delete selectedRows[s.id];
 
     activeSourceId = sources[0]?.id || null;
@@ -396,11 +399,11 @@
     mapTableBody.innerHTML='';
     if(!questions.length){
       mapTableBody.innerHTML='<tr><td colspan="3" class="muted">Load Jotform questions first.</td></tr>';
+      updateMapSummary();
       return;
     }
 
-    // grouped sheet columns
-    const grouped = {}; // sourceId -> [columns]
+    const grouped = {};
     sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
 
     questions.forEach(q=>{
@@ -446,24 +449,20 @@
       ogm.appendChild(optMan);
       sel.appendChild(ogm);
 
-      // restore saved mapping
       if(mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
 
       sel.addEventListener('change', ()=>{
         if(!sel.value){ delete mapping[q.qid]; saveMapping(); renderPreviews(); return; }
         let chosen = JSON.parse(sel.value);
-
-        // If manual, prompt for custom value now
         if (chosen.mode === 'manual'){
           const v = prompt(`Enter custom value for "${q.label}"`, mapping[q.qid]?.value || '');
-          if (v == null) { // cancel -> revert
+          if (v == null) {
             if (mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
             else sel.value = '';
             return;
           }
           chosen.value = v;
         }
-
         mapping[q.qid] = chosen;
         saveMapping();
         renderPreviews();
@@ -473,6 +472,8 @@
       tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
       mapTableBody.appendChild(tr);
     });
+
+    updateMapSummary();
   }
 
   clearMap && clearMap.addEventListener('click', ()=>{
@@ -502,9 +503,31 @@
     ok('Auto-mapped where labels matched.');
   });
 
+  // collapse/expand mapping
+  function applyMapCollapsed(){
+    if (!mappingCard || !toggleMap) return;
+    mappingCard.classList.toggle('collapsed', mapCollapsed);
+    toggleMap.textContent = mapCollapsed ? 'Expand' : 'Shrink';
+    updateMapSummary();
+    // ask JF to resize frame to current content
+    try{ JFCustomWidget.requestFrameResize && JFCustomWidget.requestFrameResize({ height: document.body.clientHeight + 10 }); }catch(_){}
+  }
+
+  function updateMapSummary(){
+    if (!mapSummary) return;
+    const totalQs = questions.length || 0;
+    const mapped = Object.keys(mapping).length || 0;
+    mapSummary.textContent = `Mapping hidden — ${mapped} of ${totalQs} fields mapped.`;
+  }
+
+  toggleMap && toggleMap.addEventListener('click', ()=>{
+    mapCollapsed = !mapCollapsed;
+    saveMapCollapsed();
+    applyMapCollapsed();
+  });
+
   // ---------- Prefill ----------
   function buildLabelValuePairs(rowBySource){
-    // returns [{label, value}] for JF.setFieldsValueByLabel
     const byLabel = {};
     questions.forEach(q=>{
       const map = mapping[q.qid]; if(!map) return;
@@ -522,7 +545,6 @@
       if (value === '') return;
 
       if (q.type === 'control_checkbox'){
-        // split multi into array
         const parts = String(value).split(/[;,]/).map(s=>s.trim()).filter(Boolean);
         if (parts.length) byLabel[q.label] = parts;
       } else {
@@ -534,7 +556,6 @@
   }
 
   function renderPreviews(){
-    // compact selected rows
     if (rowPreview){
       const compact = {};
       Object.keys(selectedRows).forEach(sid=>{
@@ -547,7 +568,6 @@
       rowPreview.textContent = Object.keys(compact).length ? JSON.stringify(compact, null, 2) : '(no rows selected)';
     }
 
-    // payload preview (label → value)
     const pairs = buildLabelValuePairs(selectedRows);
     const obj = {};
     pairs.forEach(p=> obj[p.label] = p.value);
@@ -583,7 +603,8 @@
       apiBase,
       sources: sources.map(s=>({ id:s.id, name:s.name, url:s.url, keyCol:s.keyCol, headers:s.headers || [], rowsCount:(s.rows||[]).length })),
       mapping,
-      selectedRows: Object.keys(selectedRows).map(sid=>({ sourceId:sid }))
+      selectedRows: Object.keys(selectedRows).map(sid=>({ sourceId:sid })),
+      mapCollapsed
     };
     try{ JFCustomWidget.sendData({ value: JSON.stringify(payload) }); }catch(_){}
   }, 600);
@@ -593,6 +614,7 @@
   // ---------- Boot ----------
   function boot(){
     if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+    applyMapCollapsed();
     renderSourcesDropdown();
     renderRowsList();
     renderSelectedHint();

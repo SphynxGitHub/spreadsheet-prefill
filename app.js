@@ -60,6 +60,8 @@
 
   apiKeyIn && (apiKeyIn.value = apiKey);
   apiBaseSel && (apiBaseSel.value = apiBase);
+  const prefillBtn = $('prefillBtn');
+
 
   // ---------- Helpers ----------
   function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1500); }
@@ -623,27 +625,28 @@
     }
   }
 
-  // ---------- Prefill Live Form (reuses your Create button) ----------
-  createSubmit && createSubmit.addEventListener('click', async ()=>{
-    const original = createSubmit.textContent;
-    createSubmit.disabled = true;
-    createSubmit.textContent = 'Filling…';
-    try{
-      if(!selectedRow){ throw new Error('Pick a row first.'); }
+  // Prefill the live form via labels (no API call)
+  prefillBtn && prefillBtn.addEventListener('click', async ()=>{
+    const original = prefillBtn.textContent;
+    prefillBtn.disabled = true;
+    prefillBtn.textContent = 'Filling…';
+    try {
+      if (!selectedRow) throw new Error('Pick a row first.');
       const rowBySource = { [selectedRow.__sourceId]: selectedRow };
       const pairs = buildLabelValuePairs(rowBySource);
       if (!pairs.length) throw new Error('No mapped values to fill.');
-
+  
+      // Fill the parent form
       JFCustomWidget.hideWidgetError && JFCustomWidget.hideWidgetError();
-      // The magic: fill the live parent form by labels
       JFCustomWidget.setFieldsValueByLabel(pairs);
-      showStatus('ok','Fields have been auto-filled.');
-      if (resultBox) resultBox.innerHTML = '';
-    }catch(e){
-      showStatus('err', e?.message || 'Prefill failed.');
-    }finally{
-      createSubmit.disabled = false;
-      createSubmit.textContent = original;
+  
+      // UX: flash success
+      if (resultBox) resultBox.innerHTML = '<div class="ok" style="display:block">Fields have been auto-filled.</div>';
+    } catch (e) {
+      if (resultBox) resultBox.innerHTML = `<div class="err" style="display:block">${e?.message || 'Prefill failed.'}</div>`;
+    } finally {
+      prefillBtn.disabled = false;
+      prefillBtn.textContent = original;
     }
   });
 

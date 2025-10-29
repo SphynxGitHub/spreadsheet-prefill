@@ -1,21 +1,11 @@
 /* globals JFCustomWidget, JF */
 (function(){
-  // ---------- Safe shims when testing outside Jotform ----------
+  // ---------- Safe shims for local testing ----------
   if (typeof window.JFCustomWidget === 'undefined') {
-    window.JFCustomWidget = {
-      subscribe: () => {},
-      sendData: () => {},
-      setFieldsValueByLabel: () => {},
-      requestFrameResize: () => {},
-      hideWidgetError: () => {},
-      clearFields: () => {}
-    };
+    window.JFCustomWidget = { subscribe: () => {}, sendData: () => {}, setFieldsValueByLabel: ()=>{}, hideWidgetError:()=>{}, requestFrameResize:()=>{}, getEnterprise:()=>({}), getWidgetData:()=>({}), getWidgetSettings:()=>({}), isWidgetRequired:()=>false, isFromCardform:()=>false };
   }
   if (typeof window.JF === 'undefined') {
-    window.JF = {
-      login: (ok, fail) => fail && fail(),
-      getAPIKey: () => null
-    };
+    window.JF = { login: (ok, fail)=>fail&&fail(), getAPIKey: ()=>null };
   }
 
   // ---------- State ----------
@@ -26,15 +16,23 @@
 
   /** sources: [{id,name,url,keyCol, headers:[], rows:[{}]}] */
   let sources = JSON.parse(localStorage.getItem('lf_sources')||'[]');
-  /** mapping: { [qid]: { kind: 'sheet'|'choice'|'other', sourceId?, column?, value?(string|string[]), otherValue? } } */
-  let mapping = JSON.parse(localStorage.getItem('lf_mapping')||'{}');
+  /** mapping: { [qid]: { mode:'sheet'|'choice'|'manual', sourceId?, column?, value? } } */
+  let mapping = JSON.parse(localStorage.getItem('lf_mapping_v2')||'{}');
 
-  /** questions: [{qid,label,type,name,order,options[]}] — excludes headers/paragraphs/widgets */
-  let questions = [];
-  let rawQuestionsMap = {}; // original API map for reference (if needed)
+  /** per-source current selection: { [sourceId]: rowObj } */
+  let selectedRows = JSON.parse(localStorage.getItem('lf_selectedRows')||'{}');
 
+  /** questions loaded from JF */
+  let questions = []; // [{qid,label,type,name,order, options?:[], allowOther?:bool}]
   let activeSourceId = sources[0]?.id || null;
-  let selectedRow = null; // raw row object from the chosen source
+
+  // question types to exclude (static/widget/system)
+  const EXCLUDE_TYPES = new Set([
+    'control_head','control_text','control_image','control_button',
+    'control_collapse','control_pagebreak','control_widget'
+  ]);
+
+  const CHOICE_TYPES = new Set(['control_dropdown','control_radio','control_checkbox']);
 
   // ---------- DOM ----------
   const $ = id => document.getElementById(id);
@@ -43,58 +41,47 @@
   const loginBtn = $('loginBtn'), saveKey = $('saveKey'), loadFields = $('loadFields');
   const apiKeyIn = $('apiKey'), apiBaseSel = $('apiBase');
 
-  const manualFormIdIn = $('manualFormId');
-  const saveFormIdBtn  = $('saveFormId');
-  if (manualFormIdIn) manualFormIdIn.value = manualFormId;
+  const manualFormIdIn = $('manualFormId'), saveFormIdBtn = $('saveFormId');
 
   const srcName = $('srcName'), srcUrl = $('srcUrl'), srcKeyCol = $('srcKeyCol');
   const addSource = $('addSource'), activeSource = $('activeSource');
   const btnRemoveSource = $('btnRemoveSource');
   const lookupVal = $('lookupVal'), btnSearch = $('btnSearch'), btnReloadCsv = $('btnReloadCsv');
   const rowsList = $('rowsList');
+  const selectedHint = $('selectedHint'), selectedChips = $('selectedChips');
 
   const mapTableBody = document.querySelector('#mapTable tbody');
   const clearMap = $('clearMap'), autoMap = $('autoMap');
+
   const rowPreview = $('rowPreview'), payloadPreview = $('payloadPreview');
-  const createSubmit = $('createSubmit'), resultBox = $('resultBox');
+  const prefillBtn = $('prefillBtn'), resultBox = $('resultBox');
 
   apiKeyIn && (apiKeyIn.value = apiKey);
   apiBaseSel && (apiBaseSel.value = apiBase);
-  const prefillBtn = $('prefillBtn');
-
+  if (manualFormIdIn) manualFormIdIn.value = manualFormId;
 
   // ---------- Helpers ----------
-  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1500); }
-  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',5000); }
-  function showStatus(type, msg){ if(type==='ok') ok(msg); else err(msg); }
+  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1200); }
+  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',4500); }
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
-  function saveMapping(){ localStorage.setItem('lf_mapping', JSON.stringify(mapping)); emitWidgetValue(); }
+  function saveMapping(){ localStorage.setItem('lf_mapping_v2', JSON.stringify(mapping)); emitWidgetValue(); }
+  function saveSelections(){ localStorage.setItem('lf_selectedRows', JSON.stringify(selectedRows)); emitWidgetValue(); }
 
   function getSource(id){ return sources.find(s=>s.id===id) || null; }
   function setActiveSource(id){ activeSourceId = id; renderSourcesDropdown(); renderRowsList(); }
-  function pickRow(row){ selectedRow = row; renderPreviews(); }
   function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
-
-  // ---------- Choice helpers ----------
-  const CHOICE_TYPES = new Set(['control_dropdown','control_radio','control_checkbox']);
-  const EXCLUDE_TYPES = new Set(['control_head','control_text','control_widget']);
-  function isChoiceType(t){ return CHOICE_TYPES.has(t); }
-  function isExcludedType(t){ return EXCLUDE_TYPES.has(t); }
 
   // ---------- Form ID utilities ----------
   function extractFormIdFromUrl(url) {
     if (!url) return null;
     try {
       const u = new URL(url);
-      // Live form: https://form.jotform.com/123456789012345
       const liveMatch = u.pathname.match(/\/(\d{8,20})(\/|$)/);
       if (liveMatch) return liveMatch[1];
-      // Builder: https://www.jotform.com/build/123456789012345
       const buildMatch = u.pathname.match(/\/build\/(\d{8,20})(\/|$)/);
       if (buildMatch) return buildMatch[1];
-      // Query param
       const q = u.searchParams.get('formID') || u.searchParams.get('formId');
       if (q && /^\d{8,20}$/.test(q)) return q;
     } catch(_) {}
@@ -108,22 +95,20 @@
     return null;
   }
 
-  if (saveFormIdBtn) {
-    saveFormIdBtn.addEventListener('click', () => {
-      manualFormId = (manualFormIdIn?.value || '').trim();
-      localStorage.setItem('lf_manualFormId', manualFormId);
-      formId = manualFormId || formId; // adopt it immediately
-      if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
-      ok('Form ID saved.');
-    });
-  }
+  saveFormIdBtn && saveFormIdBtn.addEventListener('click', ()=>{
+    manualFormId = (manualFormIdIn?.value || '').trim();
+    localStorage.setItem('lf_manualFormId', manualFormId);
+    formId = manualFormId || formId;
+    if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
+    ok('Form ID saved.');
+  });
 
   // ---------- CSV Fetch/Parse ----------
   async function fetchCsv(url){
     const res = await fetch(url, { mode:'cors' });
     const text = await res.text();
     const looksHtml = /^\s*</.test(text) && /<html|<head|<body/i.test(text);
-    if (!res.ok || looksHtml) throw new Error('CSV not accessible. Publish the sheet/tab as CSV (or use /export?format=csv&gid=).');
+    if (!res.ok || looksHtml) throw new Error('CSV not accessible. Publish the tab as CSV (or use /export?format=csv&gid=).');
     return parseCsvAuto(text);
   }
   function parseCsvAuto(raw){
@@ -171,85 +156,78 @@
     saveSources();
   }
 
-  // ---------- Jotform API (Questions only; prefill uses labels) ----------
+  // ---------- Jotform API ----------
   async function getQuestions(){
+    if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
-
-    // You can fetch without API key for many forms; if 401 appears, user can login/paste API key.
-    const url = `${apiBase}/form/${formId}/questions${apiKey?`?apiKey=${encodeURIComponent(apiKey)}`:''}`;
+    const url = `${apiBase}/form/${formId}/questions?apiKey=${encodeURIComponent(apiKey)}`;
     const resp = await fetch(url, { mode:'cors' });
-    if(!resp.ok) throw new Error(`Questions fetch failed (${resp.status}). Login may be required.`);
-
+    if(!resp.ok) throw new Error(`Questions fetch failed: ${resp.status}`);
     const json = await resp.json();
     const map = json.content || {};
-    rawQuestionsMap = map;
 
-    const parsed = Object.keys(map).map(qid => {
+    questions = Object.keys(map).map(qid=>{
       const q = map[qid] || {};
-      const optRaw = q.options || q.items || q.choices || '';
-      const options = Array.isArray(optRaw) ? optRaw
-        : String(optRaw||'').split('|');
+      // collect choices for choice controls
+      let opts = [];
+      if (q.options && typeof q.options === 'string'){
+        opts = q.options.split('|').map(s=>s.trim()).filter(Boolean);
+      } else if (Array.isArray(q.options)) {
+        opts = q.options.map(String);
+      }
       return {
         qid,
         label: q.text || '',
         type: q.type || '',
         name: q.name || '',
         order: q.order || 0,
-        options: options.map(s => String(s||'').trim()).filter(Boolean)
+        options: opts,
+        allowOther: !!q.allowOther
       };
-    });
-
-    questions = parsed
-      .filter(q => !isExcludedType(q.type))
-      .sort((a,b) => a.order - b.order);
+    }).filter(q => !EXCLUDE_TYPES.has(q.type)) // hide static/widget fields
+      .sort((a,b)=>a.order - b.order);
   }
 
   // ---------- UI: Auth ----------
   JFCustomWidget.subscribe('ready', payload => {
-    // Try to get formId
     formId = resolveFormId(payload);
     if (formIdLabel) {
-      formIdLabel.textContent = formId
-        ? `Form ID: ${formId}`
-        : 'Form ID not available — paste it above and click “Save Form ID”.';
+      formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available — paste it & Save.';
     }
     renderSourcesDropdown();
     renderRowsList();
+    renderSelectedHint();
+    renderSelectedChips();
     renderMappingTable();
+    renderPreviews();
     emitWidgetValue();
   });
 
-  if (loginBtn) {
-    loginBtn.addEventListener('click', ()=>{
-      JF.login(()=>{
-        try{
-          const k = JF.getAPIKey();
-          if(k){ apiKey = k; if(apiKeyIn) apiKeyIn.value = k; localStorage.setItem('lf_apiKey', apiKey); ok('Authorized.'); }
-          else err('Login ok, but API key not returned.');
-        }catch(e){ err('Login ok, but API key not returned.'); }
-      }, ()=> err('Login failed or canceled.'));
-    });
-  }
-
-  if (saveKey) {
-    saveKey.addEventListener('click', ()=>{
-      apiKey = (apiKeyIn?.value || '').trim();
-      apiBase = (apiBaseSel?.value || 'https://api.jotform.com');
-      localStorage.setItem('lf_apiKey', apiKey);
-      localStorage.setItem('lf_apiBase', apiBase);
-      ok('Saved.');
-    });
-  }
-
-  if (loadFields) {
-    loadFields.addEventListener('click', async ()=>{
+  loginBtn && loginBtn.addEventListener('click', ()=>{
+    JF.login(()=>{
       try{
-        await getQuestions();
-        renderMappingTable();
-        ok('Questions loaded.');
-      }catch(e){ err(e.message||'Failed to load questions.'); }
-    });
-  }
+        const k = JF.getAPIKey();
+        if(k){ apiKey = k; apiKeyIn && (apiKeyIn.value = k); localStorage.setItem('lf_apiKey', apiKey); ok('Authorized.'); }
+        else err('Login ok, but API key not returned.');
+      }catch(e){ err('Login ok, but API key not returned.'); }
+    }, ()=> err('Login failed or canceled.'));
+  });
+
+  saveKey && saveKey.addEventListener('click', ()=>{
+    apiKey = (apiKeyIn?.value || '').trim();
+    apiBase = (apiBaseSel?.value || 'https://api.jotform.com');
+    localStorage.setItem('lf_apiKey', apiKey);
+    localStorage.setItem('lf_apiBase', apiBase);
+    ok('Saved.');
+  });
+
+  loadFields && loadFields.addEventListener('click', async ()=>{
+    try{
+      await getQuestions();
+      renderMappingTable();
+      ok('Questions loaded.');
+    }catch(e){ err(e.message||'Failed to load questions.'); }
+  });
 
   // ---------- UI: Sources ----------
   function renderSourcesDropdown(){
@@ -267,42 +245,35 @@
     activeSource.value = activeSourceId;
   }
 
-  if (addSource) {
-    addSource.addEventListener('click', async ()=>{
-      const name  = (srcName?.value || '').trim();
-      const url   = (srcUrl?.value  || '').trim();
-      const keyCol= (srcKeyCol?.value || '').trim();
-      if (!name || !url) { err('Enter a tab name and CSV URL.'); return; }
+  addSource && addSource.addEventListener('click', async ()=>{
+    const name  = (srcName?.value || '').trim();
+    const url   = (srcUrl?.value  || '').trim();
+    const keyCol= (srcKeyCol?.value || '').trim();
+    if (!name || !url) { err('Enter a tab name and CSV URL.'); return; }
 
-      // If a source with the same URL exists, update it instead of duplicating
-      const existing = sources.find(x => x.url === url);
-      if (existing) {
-        existing.name = name;
-        if (keyCol) existing.keyCol = keyCol;
-        try {
-          await loadSourceData(existing);
-          activeSourceId = existing.id;
-          renderSourcesDropdown(); renderRowsList(); renderMappingTable();
-          ok('Updated existing source.');
-        } catch (e) {
-          err(e.message || 'Failed to refresh the existing source.');
-        }
-        return;
-      }
-
-      // Otherwise create a new source
-      const s = { id: uid(), name, url, keyCol: keyCol || null, headers: null, rows: null };
-      sources.push(s); saveSources();
+    // Update existing by URL, else create
+    const existing = sources.find(x => x.url === url);
+    if (existing) {
+      existing.name = name;
+      if (keyCol) existing.keyCol = keyCol;
       try {
-        await loadSourceData(s);
-        activeSourceId = s.id;
+        await loadSourceData(existing);
+        activeSourceId = existing.id;
         renderSourcesDropdown(); renderRowsList(); renderMappingTable();
-        ok('Source added.');
-      } catch (e) {
-        err(e.message || 'Failed to load CSV.');
-      }
-    });
-  }
+        ok('Updated existing source.');
+      } catch (e) { err(e.message || 'Failed to refresh existing source.'); }
+      return;
+    }
+
+    const s = { id: uid(), name, url, keyCol: keyCol || null, headers: null, rows: null };
+    sources.push(s); saveSources();
+    try {
+      await loadSourceData(s);
+      activeSourceId = s.id;
+      renderSourcesDropdown(); renderRowsList(); renderMappingTable();
+      ok('Source added.');
+    } catch (e) { err(e.message || 'Failed to load CSV.'); }
+  });
 
   activeSource && activeSource.addEventListener('change', ()=> setActiveSource(activeSource.value));
 
@@ -315,34 +286,47 @@
   btnRemoveSource && btnRemoveSource.addEventListener('click', ()=>{
     const s = getSource(activeSourceId);
     if (!s) { err('No source selected.'); return; }
-    if (!confirm(`Remove source "${s.name}"? This will also clear any field mappings that use it.`)) return;
+    if (!confirm(`Remove source "${s.name}"? This also clears mappings using it.`)) return;
 
-    // 1) remove from sources
+    // remove source
     sources = sources.filter(x => x.id !== s.id);
 
-    // 2) clear mappings that referenced this source
+    // clear mappings referencing it
     Object.keys(mapping).forEach(qid => {
       if (mapping[qid]?.sourceId === s.id) delete mapping[qid];
     });
 
-    // 3) clear selected row if it came from this source
-    if (selectedRow?.__sourceId === s.id) selectedRow = null;
+    // clear selected rows referencing it
+    if (selectedRows[s.id]) delete selectedRows[s.id];
 
-    // 4) pick a new active source (if any)
     activeSourceId = sources[0]?.id || null;
 
-    // 5) persist + repaint
-    saveSources();
-    saveMapping();
-    renderSourcesDropdown();
-    renderRowsList();
-    renderMappingTable();
-    renderPreviews();
+    saveSources(); saveMapping(); saveSelections();
+    renderSourcesDropdown(); renderRowsList(); renderMappingTable(); renderPreviews(); renderSelectedHint(); renderSelectedChips();
     ok('Source removed.');
   });
 
   btnSearch && btnSearch.addEventListener('click', ()=> renderRowsList());
   lookupVal && lookupVal.addEventListener('keydown', e=>{ if(e.key==='Enter') renderRowsList(); });
+
+  function pickRowFromSource(source, row){
+    selectedRows[source.id] = { __sourceId: source.id, ...row };
+    saveSelections();
+    renderSelectedHint();
+    renderSelectedChips();
+    renderPreviews();
+  }
+
+  function unselectSource(id){
+    if (selectedRows[id]) { delete selectedRows[id]; saveSelections(); renderSelectedHint(); renderSelectedChips(); renderPreviews(); }
+  }
+
+  $('btnClearSelection') && $('btnClearSelection').addEventListener('click', ()=>{
+    selectedRows = {};
+    saveSelections();
+    renderSelectedHint(); renderSelectedChips(); renderPreviews();
+    ok('Selection cleared.');
+  });
 
   function renderRowsList(){
     const s = getSource(activeSourceId);
@@ -373,10 +357,9 @@
     subset.forEach(r=>{
       const tr=document.createElement('tr'); tr.style.cursor='pointer';
       s.headers.slice(0,6).forEach(h=>{
-        const td=document.createElement('td'); td.textContent = r[h];
-        tr.appendChild(td);
+        const td=document.createElement('td'); td.textContent = r[h]; tr.appendChild(td);
       });
-      tr.addEventListener('click', ()=>{ pickRow({ __sourceId:s.id, ...r }); ok('Row selected.'); });
+      tr.addEventListener('click', ()=>{ pickRowFromSource(s, r); ok(`Row selected from "${s.name}".`); });
       tbody.appendChild(tr);
     });
     tbl.appendChild(tbody);
@@ -389,7 +372,25 @@
     }
   }
 
-  // ---------- Mapping UI (Sheet / Choice / Other) ----------
+  function renderSelectedHint(){
+    const ids = Object.keys(selectedRows);
+    if (selectedHint) selectedHint.textContent = ids.length ? `Selected rows: ${ids.length} source${ids.length>1?'s':''}` : '';
+  }
+  function renderSelectedChips(){
+    if (!selectedChips) return;
+    selectedChips.innerHTML = '';
+    const ids = Object.keys(selectedRows);
+    if (!ids.length) return;
+    ids.forEach(id=>{
+      const s = getSource(id);
+      const c = document.createElement('span'); c.className='chip';
+      c.innerHTML = `<b>${s?.name || id}</b><button title="Unselect" aria-label="Unselect">×</button>`;
+      c.querySelector('button').addEventListener('click', ()=> unselectSource(id));
+      selectedChips.appendChild(c);
+    });
+  }
+
+  // ---------- Mapping ----------
   function renderMappingTable(){
     if(!mapTableBody) return;
     mapTableBody.innerHTML='';
@@ -398,153 +399,77 @@
       return;
     }
 
-    // Build a grouped source → columns map
-    const grouped = {};
+    // grouped sheet columns
+    const grouped = {}; // sourceId -> [columns]
     sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
 
     questions.forEach(q=>{
-      // Row scaffolding
       const tr=document.createElement('tr');
 
-      const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
+      const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type.replace('control_','')})`;
       const td2=document.createElement('td'); td2.textContent = q.qid;
       const td3=document.createElement('td');
 
-      // Mode select
-      const modeSel = document.createElement('select');
-      modeSel.innerHTML = `
-        <option value="">— no mapping —</option>
-        <option value="sheet">Sheet Column</option>
-        ${isChoiceType(q.type) ? `<option value="choice">Pick Choice(s)</option>` : ''}
-        <option value="other">Other (free text)</option>
-      `;
+      const sel=document.createElement('select');
+      sel.innerHTML = `<option value="">— no mapping —</option>`;
 
-      // Container for the mode-specific control
-      const ctrlBox = document.createElement('div');
-      ctrlBox.style.marginTop = '6px';
-
-      // Build Sheet Column selector
-      function buildSheetPicker(){
-        const wrap = document.createElement('div');
-        const sel = document.createElement('select');
-        sel.innerHTML = `<option value="">— pick a column —</option>`;
-
-        Object.keys(grouped).forEach(sid=>{
-          const s = getSource(sid); if(!s || !s.headers) return;
-          const og = document.createElement('optgroup'); og.label = `${s.name}`;
-          grouped[sid].forEach(o=>{
-            const opt=document.createElement('option');
-            opt.value = JSON.stringify({ sourceId:sid, column:o.column });
-            opt.textContent = o.column;
-            og.appendChild(opt);
-          });
-          sel.appendChild(og);
+      // Sheet columns (grouped by source)
+      Object.keys(grouped).forEach(sid=>{
+        const s = getSource(sid); if(!s || !s.headers) return;
+        const og = document.createElement('optgroup'); og.label = `Sheet: ${s.name}`;
+        grouped[sid].forEach(o=>{
+          const opt=document.createElement('option');
+          opt.value = JSON.stringify({ mode:'sheet', sourceId:sid, column:o.column });
+          opt.textContent = o.column;
+          og.appendChild(opt);
         });
+        sel.appendChild(og);
+      });
 
-        // Restore
-        const m = mapping[q.qid];
-        if (m && m.kind==='sheet') {
-          sel.value = JSON.stringify({ sourceId:m.sourceId, column:m.column });
+      // Choices (if applicable)
+      if (CHOICE_TYPES.has(q.type) && (q.options?.length)){
+        const ogc = document.createElement('optgroup'); ogc.label = 'Choices';
+        q.options.forEach(ch=>{
+          const opt=document.createElement('option');
+          opt.value = JSON.stringify({ mode:'choice', value: ch });
+          opt.textContent = `Choice: ${ch}`;
+          ogc.appendChild(opt);
+        });
+        sel.appendChild(ogc);
+      }
+
+      // Manual
+      const ogm = document.createElement('optgroup'); ogm.label = 'Manual';
+      const optMan = document.createElement('option');
+      optMan.value = JSON.stringify({ mode:'manual', value:'' });
+      optMan.textContent = 'Custom value…';
+      ogm.appendChild(optMan);
+      sel.appendChild(ogm);
+
+      // restore saved mapping
+      if(mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
+
+      sel.addEventListener('change', ()=>{
+        if(!sel.value){ delete mapping[q.qid]; saveMapping(); renderPreviews(); return; }
+        let chosen = JSON.parse(sel.value);
+
+        // If manual, prompt for custom value now
+        if (chosen.mode === 'manual'){
+          const v = prompt(`Enter custom value for "${q.label}"`, mapping[q.qid]?.value || '');
+          if (v == null) { // cancel -> revert
+            if (mapping[q.qid]) sel.value = JSON.stringify(mapping[q.qid]);
+            else sel.value = '';
+            return;
+          }
+          chosen.value = v;
         }
 
-        sel.addEventListener('change', ()=>{
-          if(!sel.value){
-            delete mapping[q.qid];
-          } else {
-            const { sourceId, column } = JSON.parse(sel.value);
-            mapping[q.qid] = { kind:'sheet', sourceId, column };
-          }
-          saveMapping(); renderPreviews();
-        });
+        mapping[q.qid] = chosen;
+        saveMapping();
+        renderPreviews();
+      });
 
-        wrap.appendChild(sel);
-        return wrap;
-      }
-
-      // Build Choice picker (single or multi depending on type)
-      function buildChoicePicker(){
-        const wrap = document.createElement('div');
-        const helper = document.createElement('div');
-        helper.className = 'mini';
-        helper.textContent = (q.type==='control_checkbox')
-          ? 'Multi-select: Ctrl/Cmd-click to pick multiple.'
-          : 'Single-select.';
-        const sel = document.createElement('select');
-        if (q.type==='control_checkbox') sel.multiple = true;
-
-        // Options
-        q.options.forEach(opt=>{
-          const o = document.createElement('option');
-          o.value = opt; o.textContent = opt;
-          sel.appendChild(o);
-        });
-
-        // Restore
-        const m = mapping[q.qid];
-        if (m && m.kind==='choice') {
-          const val = m.value;
-          if (Array.isArray(val)) {
-            [...sel.options].forEach(o => { o.selected = val.includes(o.value); });
-          } else if (typeof val === 'string') {
-            [...sel.options].forEach(o => { o.selected = (o.value === val); });
-          }
-        }
-
-        sel.addEventListener('change', ()=>{
-          let value;
-          if (q.type==='control_checkbox') {
-            value = [...sel.options].filter(o=>o.selected).map(o=>o.value);
-          } else {
-            value = sel.value || '';
-          }
-          mapping[q.qid] = { kind:'choice', value };
-          saveMapping(); renderPreviews();
-        });
-
-        wrap.appendChild(helper);
-        wrap.appendChild(sel);
-        return wrap;
-      }
-
-      // Build Other (free text) input
-      function buildOtherBox(){
-        const wrap = document.createElement('div');
-        const inp = document.createElement('input');
-        inp.type = 'text'; inp.placeholder = 'Type a value…';
-        // Restore
-        const m = mapping[q.qid];
-        if (m && m.kind==='other') inp.value = m.otherValue || '';
-
-        inp.addEventListener('input', ()=>{
-          const v = inp.value;
-          if (!v) delete mapping[q.qid];
-          else mapping[q.qid] = { kind:'other', otherValue: v };
-          saveMapping(); renderPreviews();
-        });
-
-        wrap.appendChild(inp);
-        return wrap;
-      }
-
-      // Switcher
-      function paintCtrlFor(mode){
-        ctrlBox.innerHTML = '';
-        if (!mode) { delete mapping[q.qid]; saveMapping(); renderPreviews(); return; }
-        if (mode==='sheet') ctrlBox.appendChild(buildSheetPicker());
-        if (mode==='choice') ctrlBox.appendChild(buildChoicePicker());
-        if (mode==='other') ctrlBox.appendChild(buildOtherBox());
-      }
-
-      // Restore mode
-      if (mapping[q.qid]?.kind) modeSel.value = mapping[q.qid].kind;
-      modeSel.addEventListener('change', ()=>{ paintCtrlFor(modeSel.value); });
-
-      // Initial paint
-      paintCtrlFor(modeSel.value);
-
-      td3.appendChild(modeSel);
-      td3.appendChild(ctrlBox);
-
+      td3.appendChild(sel);
       tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
       mapTableBody.appendChild(tr);
     });
@@ -558,7 +483,6 @@
   });
 
   autoMap && autoMap.addEventListener('click', ()=>{
-    // Naive: if a question label matches any column (case-insensitive), choose sheet mode
     const colsByLower = {};
     sources.forEach(s=>{
       (s.headers||[]).forEach(h=>{
@@ -570,7 +494,7 @@
     questions.forEach(q=>{
       const k = (q.label||'').toLowerCase().trim();
       const cand = colsByLower[k] && colsByLower[k][0];
-      if(cand) mapping[q.qid] = { kind:'sheet', sourceId:cand.sourceId, column:cand.column };
+      if(cand) mapping[q.qid] = { mode:'sheet', ...cand };
     });
     saveMapping();
     renderMappingTable();
@@ -578,111 +502,101 @@
     ok('Auto-mapped where labels matched.');
   });
 
-  // ---------- Build Prefill Pairs & Preview ----------
+  // ---------- Prefill ----------
   function buildLabelValuePairs(rowBySource){
-    const pairs = [];
-    questions.forEach(q => {
-      const m = mapping[q.qid];
-      if (!m) return;
+    // returns [{label, value}] for JF.setFieldsValueByLabel
+    const byLabel = {};
+    questions.forEach(q=>{
+      const map = mapping[q.qid]; if(!map) return;
+      let value = '';
 
-      let val = '';
-      if (m.kind === 'sheet') {
-        const r = rowBySource[m.sourceId];
-        if (!r) return;
-        val = r[m.column] ?? '';
-      } else if (m.kind === 'choice') {
-        val = m.value ?? '';
-        if (Array.isArray(val)) {
-          // For checkbox (multi), join with comma (Jotform accepts comma-separated)
-          if (q.type === 'control_checkbox') val = val.join(', ');
-          else val = val.join(' ');
-        }
-      } else if (m.kind === 'other') {
-        val = m.otherValue ?? '';
+      if (map.mode === 'manual'){
+        value = String(map.value ?? '');
+      } else if (map.mode === 'choice'){
+        value = String(map.value ?? '');
+      } else if (map.mode === 'sheet'){
+        const r = rowBySource[map.sourceId];
+        if (r) value = r[map.column] ?? '';
       }
 
-      if (String(val).trim().length === 0) return;
-      pairs.push({ label: q.label, value: val });
+      if (value === '') return;
+
+      if (q.type === 'control_checkbox'){
+        // split multi into array
+        const parts = String(value).split(/[;,]/).map(s=>s.trim()).filter(Boolean);
+        if (parts.length) byLabel[q.label] = parts;
+      } else {
+        byLabel[q.label] = value;
+      }
     });
-    return pairs;
+
+    return Object.keys(byLabel).map(label=>({ label, value: byLabel[label] }));
   }
 
   function renderPreviews(){
-    const rowBySource = {};
-    if(selectedRow && selectedRow.__sourceId){
-      rowBySource[selectedRow.__sourceId] = selectedRow;
+    // compact selected rows
+    if (rowPreview){
+      const compact = {};
+      Object.keys(selectedRows).forEach(sid=>{
+        const r = selectedRows[sid];
+        const keys = Object.keys(r).filter(k=>k!=='__sourceId').slice(0,8);
+        const small = {}; keys.forEach(k=>small[k]=r[k]);
+        const s = getSource(sid);
+        compact[s?.name || sid] = small;
+      });
+      rowPreview.textContent = Object.keys(compact).length ? JSON.stringify(compact, null, 2) : '(no rows selected)';
     }
-    if (rowPreview) rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
 
-    const preview = {};
-    const pairs = buildLabelValuePairs(rowBySource);
-    pairs.forEach(p => { preview[p.label] = p.value; });
-
-    if (payloadPreview) {
-      payloadPreview.textContent = Object.keys(preview).length
-        ? JSON.stringify(preview, null, 2)
-        : '(no mapped values or no selected row)';
-    }
+    // payload preview (label → value)
+    const pairs = buildLabelValuePairs(selectedRows);
+    const obj = {};
+    pairs.forEach(p=> obj[p.label] = p.value);
+    if (payloadPreview) payloadPreview.textContent = Object.keys(obj).length ? JSON.stringify(obj, null, 2) : '(nothing mapped or no selections)';
   }
 
-  // Prefill the live form via labels (no API call)
   prefillBtn && prefillBtn.addEventListener('click', async ()=>{
     const original = prefillBtn.textContent;
     prefillBtn.disabled = true;
     prefillBtn.textContent = 'Filling…';
-    try {
-      if (!selectedRow) throw new Error('Pick a row first.');
-      const rowBySource = { [selectedRow.__sourceId]: selectedRow };
-      const pairs = buildLabelValuePairs(rowBySource);
-      if (!pairs.length) throw new Error('No mapped values to fill.');
-  
-      // Fill the parent form
+    try{
+      if(!Object.keys(selectedRows).length) throw new Error('Pick at least one row from a source.');
+      const pairs = buildLabelValuePairs(selectedRows);
+      if(!pairs.length) throw new Error('No mapped values derived from selections.');
+
       JFCustomWidget.hideWidgetError && JFCustomWidget.hideWidgetError();
       JFCustomWidget.setFieldsValueByLabel(pairs);
-  
-      // UX: flash success
-      if (resultBox) resultBox.innerHTML = '<div class="ok" style="display:block">Fields have been auto-filled.</div>';
-    } catch (e) {
-      if (resultBox) resultBox.innerHTML = `<div class="err" style="display:block">${e?.message || 'Prefill failed.'}</div>`;
-    } finally {
+      resultBox && (resultBox.innerHTML = '<div class="ok" style="display:block">Fields have been auto-filled from selected sources.</div>');
+      ok('Prefilled.');
+    }catch(e){
+      resultBox && (resultBox.innerHTML = `<div class="err" style="display:block">${e?.message||'Prefill failed.'}</div>`);
+      err(e?.message||'Prefill failed.');
+    }finally{
       prefillBtn.disabled = false;
       prefillBtn.textContent = original;
     }
   });
 
-  // ---------- Widget value emitter (so config is stored with the form) ----------
+  // ---------- Widget value emitter ----------
   const emit = debounce(()=>{
     const payload = {
       formId,
       apiBase,
       sources: sources.map(s=>({ id:s.id, name:s.name, url:s.url, keyCol:s.keyCol, headers:s.headers || [], rowsCount:(s.rows||[]).length })),
       mapping,
-      selectedRow: selectedRow ? { sourceId:selectedRow.__sourceId, row:selectedRow } : null
+      selectedRows: Object.keys(selectedRows).map(sid=>({ sourceId:sid }))
     };
     try{ JFCustomWidget.sendData({ value: JSON.stringify(payload) }); }catch(_){}
   }, 600);
   function emitWidgetValue(){ emit(); }
   window.addEventListener('storage', emitWidgetValue);
 
-  // ---------- Auto-resize (like Spreadsheet-to-Form) ----------
-  (function enableAutoResize(){
-    if (!('ResizeObserver' in window)) return;
-    let lastH = 0;
-    const ro = new ResizeObserver(() => {
-      const h = document.body.clientHeight + 10;
-      if (h !== lastH) {
-        lastH = h;
-        try { JFCustomWidget.requestFrameResize({ height: h }); } catch(_) {}
-      }
-    });
-    ro.observe(document.body);
-  })();
-
-  // ---------- Kick things off ----------
+  // ---------- Boot ----------
   function boot(){
     if (formIdLabel) formIdLabel.textContent = formId ? `Form ID: ${formId}` : 'Form ID not available';
     renderSourcesDropdown();
     renderRowsList();
+    renderSelectedHint();
+    renderSelectedChips();
     renderMappingTable();
     renderPreviews();
   }

@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Live Sheet → Jotform Prefill & Submit</title>
+  <title>Live Sheet → Jotform Prefill</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
   <script src="https://js.jotform.com/JotForm.js"></script>
@@ -12,38 +12,36 @@
       --bg:#f7f7f9; --card:#fff; --line:#e6e6ea; --text:#2b2f36; --muted:#6b7280; --accent:#3b82f6; --ok:#16a34a; --err:#dc2626;
       --radius:12px;
     }
-    html,body{height:100%; margin:0; padding:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif}
-    /* scroll inside widget instead of the whole iframe */
-    .wrap{
-      max-width:1080px; margin:0 auto; padding:14px;
-      max-height:calc(100vh - 20px); overflow:auto;
-      -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
-    }
-    .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:12px; margin-bottom:12px}
-    h3{margin:0 0 8px 0; font-size:16px}
-    .row{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0}
+    html,body{height:100%; margin:0;padding:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    .wrap{max-width:1080px;margin:0 auto;padding:14px; max-height:100vh; overflow:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain}
+    .wrap{ overflow-x:hidden }
+    table{ width:100%; overflow-x:auto; display:block }
+
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-bottom:12px}
+    h3{margin:0 0 8px 0;font-size:16px}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
     input[type="text"], input[type="password"], select, textarea{
-      border:1px solid var(--line); border-radius:10px; padding:8px 10px; background:#fff; min-width:220px; font:inherit
+      border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fff;min-width:220px;font:inherit
     }
-    textarea{width:100%; min-height:80px}
-    .btn{border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 12px; cursor:pointer}
-    .btn.primary{background:var(--accent); color:#fff; border-color:var(--accent)}
+    textarea{width:100%;min-height:80px}
+    .btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
+    .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
     .btn[disabled]{opacity:.6; cursor:not-allowed}
-    .muted{color:var(--muted); font-size:12px}
-    .ok{color:#065f46; background:#ecfdf5; border:1px solid #bbf7d0; padding:8px; border-radius:10px; margin:6px 0; display:none}
-    .err{color:#991b1b; background:#fef2f2; border:1px solid #fecaca; padding:8px; border-radius:10px; margin:6px 0; display:none}
-    .grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:8px}
-    table{width:100%; border-collapse:collapse; margin-top:8px}
-    th,td{border:1px solid var(--line); padding:8px; vertical-align:top}
-    th{background:#fafafd; text-align:left}
-    .list{max-height:240px; overflow:auto; border:1px solid var(--line); border-radius:10px}
-    .list table{margin:0; border-collapse:separate; border-spacing:0}
+    .muted{color:var(--muted);font-size:12px}
+    .ok{color:#065f46;background:#ecfdf5;border:1px solid #bbf7d0;padding:8px;border-radius:10px;margin:6px 0;display:none}
+    .err{color:#991b1b;background:#fef2f2;border:1px solid #fecaca;padding:8px;border-radius:10px;margin:6px 0;display:none}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
+    th,td{border:1px solid var(--line);padding:8px;vertical-align:top}
+    th{background:#fafafd;text-align:left}
+    .list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+    .list table{margin:0;border-collapse:separate;border-spacing:0}
     .list th, .list td{border-width:0 0 1px 0}
     .list tr:hover{background:#fafafa}
-    .flex-end{display:flex; justify-content:flex-end; gap:8px}
-    .mini{font-size:12px; color:#475569}
-    /* horizontal scroll wrapper for wide tables */
-    .hscroll{overflow-x:auto}
+    .flex-end{display:flex;justify-content:flex-end;gap:8px}
+    .mini{font-size:12px;color:#475569}
+    .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);margin:2px;background:#f8fafc}
+    .chip b{font-weight:600}
+    .chip button{border:none;background:transparent;cursor:pointer;color:#ef4444}
   </style>
 </head>
 <body>
@@ -74,37 +72,37 @@
   <!-- Sources -->
   <div class="card">
     <h3>Live Spreadsheet Sources (multiple tabs)</h3>
-
-    <!-- Add Source (REQUIRED by app.js) -->
-    <div class="grid" style="margin-bottom:8px">
+    <div class="grid">
       <input id="srcName" type="text" placeholder="Tab name (e.g., Contacts)" />
-      <input id="srcUrl" type="text" placeholder="CSV URL (published sheet or /export?format=csv&gid=)" />
+      <input id="srcUrl" type="text" placeholder="CSV URL (publish tab or use /export?format=csv&gid=)" />
       <input id="srcKeyCol" type="text" placeholder="Key column name (e.g., Email)" />
-      <button id="addSource" class="btn">Add Source</button>
+      <button id="addSource" class="btn">Add / Update</button>
     </div>
-
     <div class="row">
       <select id="activeSource"></select>
-      <input id="lookupVal" type="text" placeholder="Lookup key (optional, press Enter or Search)" />
+      <input id="lookupVal" type="text" placeholder="Lookup key (optional, Enter or Search)" />
       <button id="btnSearch" class="btn">Search</button>
       <button id="btnReloadCsv" class="btn">Reload CSV</button>
       <button id="btnRemoveSource" class="btn">Remove Source</button>
+      <button id="btnClearSelection" class="btn">Clear Selection</button>
+      <span id="selectedHint" class="mini"></span>
     </div>
-
     <div class="list" id="rowsList" aria-live="polite"></div>
-    <div class="mini">Tip: you can leave Lookup blank and just click a row below. The first row of the CSV must be headers.</div>
+    <div id="selectedChips" class="mini"></div>
+    <div class="mini">Tip: leave Lookup blank and click any row below. First row of the CSV must be headers.</div>
   </div>
 
   <!-- Mapping -->
   <div class="card">
     <h3>Map Sheet Columns → Jotform Questions</h3>
-    <div class="mini">Pick which sheet column to use for each Jotform field. Options are grouped by source (tab).</div>
-    <div class="hscroll">
-      <table id="mapTable">
-        <thead><tr><th>Question (type)</th><th>QID</th><th>Sheet Column</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div class="mini">
+      Static headers/paragraphs/widgets are hidden. For Dropdown/Single/Multiple Choice you may map to a sheet column,
+      pick an available choice, or select <i>Manual → Custom value…</i>.
     </div>
+    <table id="mapTable">
+      <thead><tr><th>Question (type)</th><th>QID</th><th>Sheet/Choice/Manual</th></tr></thead>
+      <tbody></tbody>
+    </table>
     <div class="row">
       <button id="clearMap" class="btn">Clear Mapping</button>
       <button id="autoMap" class="btn">Auto-map by label match</button>
@@ -112,26 +110,24 @@
     </div>
   </div>
 
-<!-- Preview & Submit -->
-<div class="card">
-  <h3>Preview & Submit</h3>
-  <div class="grid">
-    <div>
-      <div class="mini">Selected Row Preview (raw)</div>
-      <pre id="rowPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+  <!-- Preview & Prefill -->
+  <div class="card">
+    <h3>Preview & Prefill</h3>
+    <div class="grid">
+      <div>
+        <div class="mini">Selected Rows (compact)</div>
+        <pre id="rowPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+      </div>
+      <div>
+        <div class="mini">Will Set (label → value)</div>
+        <pre id="payloadPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+      </div>
     </div>
-    <div>
-      <div class="mini">Submission Payload Preview</div>
-      <pre id="payloadPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
+    <div class="flex-end">
+      <button id="prefillBtn" class="btn primary">Prefill Live Form</button>
     </div>
+    <div id="resultBox"></div>
   </div>
-  <div class="flex-end">
-    <!-- NEW: prefill-only button -->
-    <button id="prefillBtn" class="btn">Prefill Live Form</button>
-    <!-- keep for future; disabled for now -->
-    <button id="createSubmit" class="btn primary" disabled title="API submit is disabled; using live prefill instead.">Create Submission</button>
-  </div>
-  <div id="resultBox"></div>
 </div>
 
 <script src="app.js"></script>

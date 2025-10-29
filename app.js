@@ -2,10 +2,20 @@
 (function(){
   // ---------- Safe shims when testing outside Jotform ----------
   if (typeof window.JFCustomWidget === 'undefined') {
-    window.JFCustomWidget = { subscribe: () => {}, sendData: () => {} };
+    window.JFCustomWidget = {
+      subscribe: () => {},
+      sendData: () => {},
+      setFieldsValueByLabel: () => {},
+      requestFrameResize: () => {},
+      hideWidgetError: () => {},
+      clearFields: () => {}
+    };
   }
   if (typeof window.JF === 'undefined') {
-    window.JF = { login: (ok, fail) => fail && fail(), getAPIKey: () => null };
+    window.JF = {
+      login: (ok, fail) => fail && fail(),
+      getAPIKey: () => null
+    };
   }
 
   // ---------- State ----------
@@ -16,11 +26,13 @@
 
   /** sources: [{id,name,url,keyCol, headers:[], rows:[{}]}] */
   let sources = JSON.parse(localStorage.getItem('lf_sources')||'[]');
-  /** mapping: { [qid]: { sourceId, column } } */
+  /** mapping: { [qid]: { kind: 'sheet'|'choice'|'other', sourceId?, column?, value?(string|string[]), otherValue? } } */
   let mapping = JSON.parse(localStorage.getItem('lf_mapping')||'{}');
 
-  // questions: [{qid,label,type,name,order, raw, isStatic, choices:[...], allowsMultiple:boolean}]
+  /** questions: [{qid,label,type,name,order,options[]}] — excludes headers/paragraphs/widgets */
   let questions = [];
+  let rawQuestionsMap = {}; // original API map for reference (if needed)
+
   let activeSourceId = sources[0]?.id || null;
   let selectedRow = null; // raw row object from the chosen source
 
@@ -50,8 +62,9 @@
   apiBaseSel && (apiBaseSel.value = apiBase);
 
   // ---------- Helpers ----------
-  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1600); }
-  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',6000); }
+  function ok(msg='Done.'){ if(!flashOk) return; flashOk.textContent=msg; flashOk.style.display='block'; setTimeout(()=>flashOk.style.display='none',1500); }
+  function err(msg){ if(!flashErr) return; flashErr.textContent=msg; flashErr.style.display='block'; setTimeout(()=>flashErr.style.display='none',5000); }
+  function showStatus(type, msg){ if(type==='ok') ok(msg); else err(msg); }
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function saveSources(){ localStorage.setItem('lf_sources', JSON.stringify(sources)); emitWidgetValue(); }
@@ -59,18 +72,27 @@
 
   function getSource(id){ return sources.find(s=>s.id===id) || null; }
   function setActiveSource(id){ activeSourceId = id; renderSourcesDropdown(); renderRowsList(); }
-  function pickRow(row){ selectedRow = row; renderPreviews(); emitWidgetValue(); }
+  function pickRow(row){ selectedRow = row; renderPreviews(); }
   function debounce(fn,ms=400){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
+
+  // ---------- Choice helpers ----------
+  const CHOICE_TYPES = new Set(['control_dropdown','control_radio','control_checkbox']);
+  const EXCLUDE_TYPES = new Set(['control_head','control_text','control_widget']);
+  function isChoiceType(t){ return CHOICE_TYPES.has(t); }
+  function isExcludedType(t){ return EXCLUDE_TYPES.has(t); }
 
   // ---------- Form ID utilities ----------
   function extractFormIdFromUrl(url) {
     if (!url) return null;
     try {
       const u = new URL(url);
+      // Live form: https://form.jotform.com/123456789012345
       const liveMatch = u.pathname.match(/\/(\d{8,20})(\/|$)/);
       if (liveMatch) return liveMatch[1];
+      // Builder: https://www.jotform.com/build/123456789012345
       const buildMatch = u.pathname.match(/\/build\/(\d{8,20})(\/|$)/);
       if (buildMatch) return buildMatch[1];
+      // Query param
       const q = u.searchParams.get('formID') || u.searchParams.get('formId');
       if (q && /^\d{8,20}$/.test(q)) return q;
     } catch(_) {}
@@ -147,324 +169,42 @@
     saveSources();
   }
 
-  // ---------- Jotform question helpers ----------
-  const STATIC_TYPES = new Set([
-    'control_head','control_text','control_image','control_button','control_divider',
-    'control_collapse','control_pagebreak','control_separator'
-  ]);
-  const MULTI_TYPES = new Set(['control_checkbox']); // allows multiple choices
-  const SINGLE_TYPES_WITH_CHOICES = new Set(['control_dropdown','control_radio']);
-  function isStaticType(t){ return STATIC_TYPES.has((t||'').toLowerCase()); }
-  function allowsMultiple(t){ return MULTI_TYPES.has((t||'').toLowerCase()); }
-  function hasChoices(t){ const tt=(t||'').toLowerCase(); return SINGLE_TYPES_WITH_CHOICES.has(tt) || MULTI_TYPES.has(tt); }
-
-  function extractChoicesFromRaw(raw){
-    // Jotform question raw often has "options" as:
-    // - array of strings, or
-    // - string "A|B|C", or
-    // - object with .options or .items etc. We'll be defensive.
-    const r = raw || {};
-    let opts = [];
-
-    if (Array.isArray(r.options)) {
-      opts = r.options.slice();
-    } else if (typeof r.options === 'string') {
-      opts = r.options.split('|').map(s=>s.trim()).filter(Boolean);
-    } else if (Array.isArray(r.items)) {
-      opts = r.items.map(x => (typeof x==='string'?x:(x?.text||''))).filter(Boolean);
-    } else if (typeof r.specialOptions === 'string') { // fallback if provided
-      opts = r.specialOptions.split('|').map(s=>s.trim()).filter(Boolean);
-    }
-
-    // Dedup & clean
-    const seen = new Set();
-    const clean = [];
-    opts.forEach(o=>{
-      const k = String(o||'').trim();
-      if (k && !seen.has(k)) { seen.add(k); clean.push(k); }
-    });
-    return clean;
-  }
-
+  // ---------- Jotform API (Questions only; prefill uses labels) ----------
   async function getQuestions(){
-    if(!apiKey) throw new Error('Paste an API key or Login first.');
     if(!formId) throw new Error('Form ID not available.');
-  
-    const url = `${apiBase}/form/${formId}/questions?apiKey=${encodeURIComponent(apiKey)}`;
+
+    // You can fetch without API key for many forms; if 401 appears, user can login/paste API key.
+    const url = `${apiBase}/form/${formId}/questions${apiKey?`?apiKey=${encodeURIComponent(apiKey)}`:''}`;
     const resp = await fetch(url, { mode:'cors' });
-    if(!resp.ok) throw new Error(`Questions fetch failed: ${resp.status}`);
+    if(!resp.ok) throw new Error(`Questions fetch failed (${resp.status}). Login may be required.`);
+
     const json = await resp.json();
     const map = json.content || {};
-  
-    // types to EXCLUDE from mapping (static / widget / layout)
-    const EXCLUDE = new Set([
-      'control_head','control_text','control_image','control_button',
-      'control_pagebreak','control_collapse','control_widget'
-    ]);
-  
-    // choice types we’ll add fixed values for
-    const CHOICE_TYPES = new Set([
-      'control_dropdown','control_radio','control_checkbox'
-    ]);
-  
-    questions = Object.keys(map).map(qid => {
+    rawQuestionsMap = map;
+
+    const parsed = Object.keys(map).map(qid => {
       const q = map[qid] || {};
-      const type = q.type || '';
-      const label = q.text || '';
-      // parse options if any (Jotform usually pipes options, e.g. "A|B|C")
-      const choices = CHOICE_TYPES.has(type)
-        ? String(q.options || '')
-            .split('|')
-            .map(s => s.trim())
-            .filter(Boolean)
-        : [];
+      const optRaw = q.options || q.items || q.choices || '';
+      const options = Array.isArray(optRaw) ? optRaw
+        : String(optRaw||'').split('|');
       return {
         qid,
-        label,
-        type,
+        label: q.text || '',
+        type: q.type || '',
         name: q.name || '',
         order: q.order || 0,
-        choices
+        options: options.map(s => String(s||'').trim()).filter(Boolean)
       };
-    })
-    .filter(q => !EXCLUDE.has(q.type)) // drop static/widget types
-    .sort((a,b)=>a.order - b.order);
-  }
-
-  // Normalize a value for choice questions (respect allowed choices; support multi via comma/semicolon/pipe)
-  function normalizeChoiceValue(q, rawVal){
-    if (!hasChoices(q.type)) return rawVal;
-    const choicesSet = new Set(q.choices.map(c => c.toLowerCase()));
-    const splitIfMulti = v => String(v).split(/[;,|]/).map(s=>s.trim()).filter(Boolean);
-
-    if (q.allowsMultiple) {
-      const parts = Array.isArray(rawVal) ? rawVal : splitIfMulti(rawVal);
-      const picked = parts
-        .map(p => p.trim())
-        .filter(p => choicesSet.has(p.toLowerCase()));
-      // Jotform accepts comma-separated for checkbox
-      return picked.join(', ');
-    } else {
-      const v = String(rawVal||'').trim();
-      if (choicesSet.has(v.toLowerCase())) return v;
-      // attempt loose match by case-insensitive contains
-      const loose = q.choices.find(c => c.toLowerCase() === v.toLowerCase());
-      return loose || ''; // if not valid, send empty to avoid API rejecting
-    }
-  }
-
-  // ---------- Submission build/post ----------
-  function buildSubmissionBody(rowBySource){
-    const data = new URLSearchParams();
-  
-    Object.keys(mapping).forEach(qid=>{
-      const m = mapping[qid]; if(!m) return;
-  
-      if (m.kind === 'sheet') {
-        const r = rowBySource[m.sourceId]; if(!r) return;
-        const val = r[m.column] ?? '';
-        data.append(`submission[${qid}]`, val);
-        return;
-      }
-  
-      if (m.kind === 'fixed') {
-        data.append(`submission[${qid}]`, m.value ?? '');
-        return;
-      }
-  
-      if (m.kind === 'fixedMulti') {
-        const arr = Array.isArray(m.values) ? m.values : [];
-        // Jotform checkboxes accept comma-separated values
-        data.append(`submission[${qid}]`, arr.join(', '));
-        return;
-      }
-  
-      if (m.kind === 'text') {
-        data.append(`submission[${qid}]`, m.value ?? '');
-        return;
-      }
     });
-  
-    return data;
+
+    questions = parsed
+      .filter(q => !isExcludedType(q.type))
+      .sort((a,b) => a.order - b.order);
   }
-  
-  createSubmit && createSubmit.addEventListener('click', async ()=>{
-    if(!selectedRow){ err('Pick a row first.'); return; }
-  
-    createSubmit.disabled = true;
-    const originalLabel = createSubmit.textContent;
-    createSubmit.textContent = 'Creating…';
-  
-    try{
-      const rowBySource = { [selectedRow.__sourceId]: selectedRow };
-      const body = buildSubmissionBody(rowBySource);
-      const sid = await createSubmission(body);
-      const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
-  
-      if (resultBox) {
-        resultBox.innerHTML = `
-          <div class="ok" style="display:block">
-            Created submission <b>${sid}</b>.
-            <a href="${editUrl}" target="_blank" rel="noopener">Open Edit Page</a>
-          </div>`;
-      }
-  
-      // Try opening in a new tab and also attempt top redirect (may be blocked by sandbox; new tab is safer)
-      try { window.open(editUrl, '_blank', 'noopener'); } catch(_) {}
-      try { window.top.location.href = editUrl; } catch(_) {} // harmless if blocked
-    }catch(e){
-      err(e.message || 'Failed to create submission.');
-    }finally{
-      createSubmit.disabled = false;
-      createSubmit.textContent = originalLabel;
-    }
-  });
-
-// --- Tiny inline debug console ---
-function debug(msg, data){
-  const box = document.getElementById('debugBox');
-  if (!box) return;
-  const time = new Date().toLocaleTimeString();
-  const line = document.createElement('div');
-  line.style.whiteSpace = 'pre-wrap';
-  line.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
-  line.textContent = `[${time}] ${msg}${data!==undefined ? ' — ' + (typeof data==='string' ? data : JSON.stringify(data, null, 2)) : ''}`;
-  box.appendChild(line);
-  box.scrollTop = box.scrollHeight;
-}
-
-// --- Robust POST with timeout & helpful errors ---
-async function createSubmission(body){
-  if(!apiKey) throw new Error('Paste an API key or Login first.');
-  if(!formId) throw new Error('Form ID not available.');
-
-  const url = `${apiBase}/form/${formId}/submissions?apiKey=${encodeURIComponent(apiKey)}`;
-  debug('POST', { url, body:[...body.entries()].reduce((o,[k,v]) => (o[k]=v,o), {}) });
-
-  // Use AbortController for a real timeout (25s)
-  const ctrl = new AbortController();
-  const t = setTimeout(()=>ctrl.abort(), 25000);
-
-  let resp, text;
-  try{
-    resp = await fetch(url, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
-      body,
-      mode:'cors',
-      signal: ctrl.signal
-    });
-    text = await resp.text();
-  }catch(e){
-    clearTimeout(t);
-    debug('Network error', String(e));
-    throw new Error('Network error (possible CORS/timeout).');
-  }
-  clearTimeout(t);
-
-  // Try to parse JSON (Jotform API returns JSON)
-  let json;
-  try { json = JSON.parse(text); } catch(_){ /* not JSON */ }
-
-  debug('Response', json || text);
-
-  if (!resp.ok) {
-    // Surface API message if present
-    const apiMsg = json?.message || json?.error || text || `HTTP ${resp.status}`;
-    throw new Error(apiMsg);
-  }
-
-  // Jotform can send {success:false, message:"...", content:{...}}
-  if (json && json.success === false) {
-    const apiMsg = json.message || 'API returned success=false.';
-    throw new Error(apiMsg);
-  }
-
-  const c = json?.content || {};
-  const sid = c.id || c.submissionID || c.sid || null;
-  if(!sid) {
-    throw new Error('Submission created but ID not found in response.');
-  }
-  return String(sid);
-}
-
-// Build body now supports sheet/fixed/fixedMulti/text (unchanged from last patch)
-function buildSubmissionBody(rowBySource){
-  const data = new URLSearchParams();
-
-  let mappedCount = 0;
-  Object.keys(mapping).forEach(qid=>{
-    const m = mapping[qid]; if(!m) return;
-
-    if (m.kind === 'sheet') {
-      const r = rowBySource[m.sourceId]; if(!r) return;
-      data.append(`submission[${qid}]`, r[m.column] ?? '');
-      mappedCount++; return;
-    }
-    if (m.kind === 'fixed') {
-      data.append(`submission[${qid}]`, m.value ?? '');
-      mappedCount++; return;
-    }
-    if (m.kind === 'fixedMulti') {
-      const arr = Array.isArray(m.values) ? m.values : [];
-      data.append(`submission[${qid}]`, arr.join(', '));
-      mappedCount++; return;
-    }
-    if (m.kind === 'text') {
-      data.append(`submission[${qid}]`, m.value ?? '');
-      mappedCount++; return;
-    }
-  });
-
-  if (mappedCount === 0) {
-    // Jotform *usually* accepts an empty submission, but some setups won’t.
-    // Add a harmless “note” to ensure the POST carries something.
-    data.append('submission[note]', 'prefill');
-  }
-
-  return data;
-}
-
-// Click handler with bulletproof re-enable + error surfacing
-createSubmit && createSubmit.addEventListener('click', async ()=>{
-  if(!selectedRow){ err('Pick a row first.'); return; }
-
-  createSubmit.disabled = true;
-  const originalLabel = createSubmit.textContent;
-  createSubmit.textContent = 'Creating…';
-
-  try{
-    const rowBySource = { [selectedRow.__sourceId]: selectedRow };
-    const body = buildSubmissionBody(rowBySource);
-    const sid  = await createSubmission(body);
-    const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
-
-    if (resultBox) {
-      resultBox.innerHTML = `
-        <div class="ok" style="display:block">
-          Created submission <b>${sid}</b>.
-          <a href="${editUrl}" target="_blank" rel="noopener">Open Edit Page</a>
-        </div>`;
-    }
-
-    // Try best-effort open. Popup blockers sometimes block _blank from async.
-    // You’ll still have the clickable link above.
-    try { window.open(editUrl, '_blank', 'noopener'); } catch(_) {}
-    try { window.top.location.href = editUrl; } catch(_) {}
-
-    ok('Submission created.');
-  }catch(e){
-    err(e.message || 'Failed to create submission.');
-    debug('Error', e?.stack || String(e));
-  }finally{
-    createSubmit.disabled = false;
-    createSubmit.textContent = originalLabel;
-  }
-});
-
 
   // ---------- UI: Auth ----------
   JFCustomWidget.subscribe('ready', payload => {
+    // Try to get formId
     formId = resolveFormId(payload);
     if (formIdLabel) {
       formIdLabel.textContent = formId
@@ -538,11 +278,13 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
         existing.name = name;
         if (keyCol) existing.keyCol = keyCol;
         try {
-          await loadSourceData(existing); // refresh headers/rows
+          await loadSourceData(existing);
           activeSourceId = existing.id;
           renderSourcesDropdown(); renderRowsList(); renderMappingTable();
           ok('Updated existing source.');
-        } catch (e) { err(e.message || 'Failed to refresh the existing source.'); }
+        } catch (e) {
+          err(e.message || 'Failed to refresh the existing source.');
+        }
         return;
       }
 
@@ -554,7 +296,9 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
         activeSourceId = s.id;
         renderSourcesDropdown(); renderRowsList(); renderMappingTable();
         ok('Source added.');
-      } catch (e) { err(e.message || 'Failed to load CSV.'); }
+      } catch (e) {
+        err(e.message || 'Failed to load CSV.');
+      }
     });
   }
 
@@ -565,8 +309,6 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     try{ await loadSourceData(s); renderRowsList(); renderMappingTable(); ok('CSV reloaded.'); }
     catch(e){ err(e.message||'Reload failed.'); }
   });
-
-  btnSearch && btnSearch.addEventListener('click', ()=> renderRowsList());
 
   btnRemoveSource && btnRemoveSource.addEventListener('click', ()=>{
     const s = getSource(activeSourceId);
@@ -594,13 +336,11 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     renderRowsList();
     renderMappingTable();
     renderPreviews();
-    emitWidgetValue();
     ok('Source removed.');
   });
 
-  lookupVal && lookupVal.addEventListener('keydown', e=>{
-    if(e.key==='Enter') renderRowsList();
-  });
+  btnSearch && btnSearch.addEventListener('click', ()=> renderRowsList());
+  lookupVal && lookupVal.addEventListener('keydown', e=>{ if(e.key==='Enter') renderRowsList(); });
 
   function renderRowsList(){
     const s = getSource(activeSourceId);
@@ -647,199 +387,167 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     }
   }
 
-  // ---------- UI: Mapping ----------
+  // ---------- Mapping UI (Sheet / Choice / Other) ----------
   function renderMappingTable(){
     if(!mapTableBody) return;
     mapTableBody.innerHTML='';
-  
     if(!questions.length){
       mapTableBody.innerHTML='<tr><td colspan="3" class="muted">Load Jotform questions first.</td></tr>';
       return;
     }
-  
-    // group sheet columns per source
-    const grouped = {}; // sourceId -> [columns]
-    sources.forEach(s => grouped[s.id] = (s.headers||[]).map(h => ({ column:h, source:s })) );
-  
+
+    // Build a grouped source → columns map
+    const grouped = {};
+    sources.forEach(s=> grouped[s.id] = (s.headers||[]).map(h=>({ column:h, source:s })) );
+
     questions.forEach(q=>{
+      // Row scaffolding
       const tr=document.createElement('tr');
-  
+
       const td1=document.createElement('td'); td1.textContent = `${q.label} (${q.type})`;
       const td2=document.createElement('td'); td2.textContent = q.qid;
       const td3=document.createElement('td');
-  
-      const sel=document.createElement('select');
-      sel.style.minWidth = '260px';
-  
-      // default
-      sel.innerHTML = `<option value="">— no mapping —</option>`;
-  
-      // From Sheets (optgroups by source)
-      Object.keys(grouped).forEach(sid=>{
-        const s = getSource(sid); if(!s || !s.headers) return;
-        const og = document.createElement('optgroup'); og.label = `From Sheets — ${s.name}`;
-        grouped[sid].forEach(o=>{
-          const opt=document.createElement('option');
-          opt.value = JSON.stringify({ kind:'sheet', sourceId:sid, column:o.column });
-          opt.textContent = o.column;
-          og.appendChild(opt);
-        });
-        sel.appendChild(og);
-      });
-  
-      // Fixed values from the form’s own choices (if applicable)
-      if ((q.choices||[]).length) {
-        const og = document.createElement('optgroup');
-        og.label = 'Fixed values — Form choices';
-        q.choices.forEach(choice=>{
-          const opt=document.createElement('option');
-          opt.value = JSON.stringify({ kind:'fixed', value:choice });
-          opt.textContent = choice;
-          og.appendChild(opt);
-        });
-  
-        // If multi-select allowed (checkbox), add a special "Multiple…" option
-        if (q.type === 'control_checkbox') {
-          const multiOpt = document.createElement('option');
-          multiOpt.value = JSON.stringify({ kind:'fixedMultiPrompt' });
-          multiOpt.textContent = 'Multiple…';
-          og.appendChild(multiOpt);
-        }
-  
-        sel.appendChild(og);
-      }
-  
-      // "Other…" free-entry option (always available)
-      {
-        const og = document.createElement('optgroup');
-        og.label = 'Custom';
-        const otherOpt = document.createElement('option');
-        otherOpt.value = JSON.stringify({ kind:'textPrompt' });
-        otherOpt.textContent = 'Other… (type in a custom value)';
-        og.appendChild(otherOpt);
-        sel.appendChild(og);
-      }
-  
-      // restore saved mapping
-      if(mapping[q.qid]){
-        sel.value = JSON.stringify(mapping[q.qid]);
-      }
-  
-      // inline editor area for multi/other (appears when chosen)
-      const inlineWrap = document.createElement('div');
-      inlineWrap.style.marginTop = '6px';
-      inlineWrap.style.display = 'none';
-  
-      function showInlineEditor(config){
-        inlineWrap.innerHTML = '';
-        inlineWrap.style.display = 'block';
-  
-        if (config.kind === 'text') {
-          // single free-text
-          const inp = document.createElement('input');
-          inp.type = 'text';
-          inp.placeholder = 'Enter custom value…';
-          inp.style.minWidth = '260px';
-          inp.value = config.value || '';
-          inlineWrap.appendChild(inp);
-  
-          const saveBtn = document.createElement('button');
-          saveBtn.textContent = 'Save';
-          saveBtn.className = 'btn';
-          saveBtn.style.marginLeft = '6px';
-          inlineWrap.appendChild(saveBtn);
-  
-          saveBtn.addEventListener('click', ()=>{
-            mapping[q.qid] = { kind:'text', value: inp.value || '' };
-            saveMapping();
-            // reflect in <select> too
-            sel.value = JSON.stringify(mapping[q.qid]);
-            ok('Saved.');
+
+      // Mode select
+      const modeSel = document.createElement('select');
+      modeSel.innerHTML = `
+        <option value="">— no mapping —</option>
+        <option value="sheet">Sheet Column</option>
+        ${isChoiceType(q.type) ? `<option value="choice">Pick Choice(s)</option>` : ''}
+        <option value="other">Other (free text)</option>
+      `;
+
+      // Container for the mode-specific control
+      const ctrlBox = document.createElement('div');
+      ctrlBox.style.marginTop = '6px';
+
+      // Build Sheet Column selector
+      function buildSheetPicker(){
+        const wrap = document.createElement('div');
+        const sel = document.createElement('select');
+        sel.innerHTML = `<option value="">— pick a column —</option>`;
+
+        Object.keys(grouped).forEach(sid=>{
+          const s = getSource(sid); if(!s || !s.headers) return;
+          const og = document.createElement('optgroup'); og.label = `${s.name}`;
+          grouped[sid].forEach(o=>{
+            const opt=document.createElement('option');
+            opt.value = JSON.stringify({ sourceId:sid, column:o.column });
+            opt.textContent = o.column;
+            og.appendChild(opt);
           });
+          sel.appendChild(og);
+        });
+
+        // Restore
+        const m = mapping[q.qid];
+        if (m && m.kind==='sheet') {
+          sel.value = JSON.stringify({ sourceId:m.sourceId, column:m.column });
         }
-  
-        if (config.kind === 'fixedMulti') {
-          // multi-choice chooser (checkboxes)
-          const choices = q.choices || [];
-          if (!choices.length) {
-            inlineWrap.textContent = 'This field has no defined choices.';
-            return;
+
+        sel.addEventListener('change', ()=>{
+          if(!sel.value){
+            delete mapping[q.qid];
+          } else {
+            const { sourceId, column } = JSON.parse(sel.value);
+            mapping[q.qid] = { kind:'sheet', sourceId, column };
           }
-  
-          const holder = document.createElement('div');
-          holder.style.display = 'grid';
-          holder.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
-          holder.style.gap = '4px';
-  
-          const selected = new Set(config.values || []);
-          choices.forEach(ch=>{
-            const lab = document.createElement('label');
-            lab.style.display = 'flex'; lab.style.alignItems = 'center'; lab.style.gap = '6px';
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = selected.has(ch);
-            cb.addEventListener('change', ()=> {
-              if (cb.checked) selected.add(ch); else selected.delete(ch);
-            });
-            lab.appendChild(cb);
-            lab.appendChild(document.createTextNode(ch));
-            holder.appendChild(lab);
-          });
-          inlineWrap.appendChild(holder);
-  
-          const saveBtn = document.createElement('button');
-          saveBtn.textContent = 'Save';
-          saveBtn.className = 'btn';
-          saveBtn.style.marginTop = '6px';
-          inlineWrap.appendChild(saveBtn);
-  
-          saveBtn.addEventListener('click', ()=>{
-            mapping[q.qid] = { kind:'fixedMulti', values: Array.from(selected) };
-            saveMapping();
-            sel.value = JSON.stringify(mapping[q.qid]);
-            ok('Saved.');
-          });
-        }
+          saveMapping(); renderPreviews();
+        });
+
+        wrap.appendChild(sel);
+        return wrap;
       }
-  
-      sel.addEventListener('change', ()=>{
-        if(!sel.value){
-          delete mapping[q.qid];
-          inlineWrap.style.display = 'none';
-          saveMapping();
-          renderPreviews();
-          return;
+
+      // Build Choice picker (single or multi depending on type)
+      function buildChoicePicker(){
+        const wrap = document.createElement('div');
+        const helper = document.createElement('div');
+        helper.className = 'mini';
+        helper.textContent = (q.type==='control_checkbox')
+          ? 'Multi-select: Ctrl/Cmd-click to pick multiple.'
+          : 'Single-select.';
+        const sel = document.createElement('select');
+        if (q.type==='control_checkbox') sel.multiple = true;
+
+        // Options
+        q.options.forEach(opt=>{
+          const o = document.createElement('option');
+          o.value = opt; o.textContent = opt;
+          sel.appendChild(o);
+        });
+
+        // Restore
+        const m = mapping[q.qid];
+        if (m && m.kind==='choice') {
+          const val = m.value;
+          if (Array.isArray(val)) {
+            [...sel.options].forEach(o => { o.selected = val.includes(o.value); });
+          } else if (typeof val === 'string') {
+            [...sel.options].forEach(o => { o.selected = (o.value === val); });
+          }
         }
-  
-        const chosen = JSON.parse(sel.value);
-  
-        // trigger prompts/editors
-        if (chosen.kind === 'textPrompt') {
-          inlineWrap.style.display = 'block';
-          showInlineEditor({ kind:'text', value: '' });
-          return;
-        }
-        if (chosen.kind === 'fixedMultiPrompt') {
-          inlineWrap.style.display = 'block';
-          showInlineEditor({ kind:'fixedMulti', values: [] });
-          return;
-        }
-  
-        // normal selections (sheet column or single fixed choice)
-        mapping[q.qid] = chosen;
-        inlineWrap.style.display = 'none';
-        saveMapping();
-        renderPreviews();
-      });
-  
-      td3.appendChild(sel);
-      td3.appendChild(inlineWrap);
-  
+
+        sel.addEventListener('change', ()=>{
+          let value;
+          if (q.type==='control_checkbox') {
+            value = [...sel.options].filter(o=>o.selected).map(o=>o.value);
+          } else {
+            value = sel.value || '';
+          }
+          mapping[q.qid] = { kind:'choice', value };
+          saveMapping(); renderPreviews();
+        });
+
+        wrap.appendChild(helper);
+        wrap.appendChild(sel);
+        return wrap;
+      }
+
+      // Build Other (free text) input
+      function buildOtherBox(){
+        const wrap = document.createElement('div');
+        const inp = document.createElement('input');
+        inp.type = 'text'; inp.placeholder = 'Type a value…';
+        // Restore
+        const m = mapping[q.qid];
+        if (m && m.kind==='other') inp.value = m.otherValue || '';
+
+        inp.addEventListener('input', ()=>{
+          const v = inp.value;
+          if (!v) delete mapping[q.qid];
+          else mapping[q.qid] = { kind:'other', otherValue: v };
+          saveMapping(); renderPreviews();
+        });
+
+        wrap.appendChild(inp);
+        return wrap;
+      }
+
+      // Switcher
+      function paintCtrlFor(mode){
+        ctrlBox.innerHTML = '';
+        if (!mode) { delete mapping[q.qid]; saveMapping(); renderPreviews(); return; }
+        if (mode==='sheet') ctrlBox.appendChild(buildSheetPicker());
+        if (mode==='choice') ctrlBox.appendChild(buildChoicePicker());
+        if (mode==='other') ctrlBox.appendChild(buildOtherBox());
+      }
+
+      // Restore mode
+      if (mapping[q.qid]?.kind) modeSel.value = mapping[q.qid].kind;
+      modeSel.addEventListener('change', ()=>{ paintCtrlFor(modeSel.value); });
+
+      // Initial paint
+      paintCtrlFor(modeSel.value);
+
+      td3.appendChild(modeSel);
+      td3.appendChild(ctrlBox);
+
       tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
       mapTableBody.appendChild(tr);
     });
   }
-  
+
   clearMap && clearMap.addEventListener('click', ()=>{
     mapping = {};
     saveMapping();
@@ -848,6 +556,7 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
   });
 
   autoMap && autoMap.addEventListener('click', ()=>{
+    // Naive: if a question label matches any column (case-insensitive), choose sheet mode
     const colsByLower = {};
     sources.forEach(s=>{
       (s.headers||[]).forEach(h=>{
@@ -859,7 +568,7 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     questions.forEach(q=>{
       const k = (q.label||'').toLowerCase().trim();
       const cand = colsByLower[k] && colsByLower[k][0];
-      if(cand) mapping[q.qid] = cand;
+      if(cand) mapping[q.qid] = { kind:'sheet', sourceId:cand.sourceId, column:cand.column };
     });
     saveMapping();
     renderMappingTable();
@@ -867,7 +576,35 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     ok('Auto-mapped where labels matched.');
   });
 
-  // ---------- Preview & Submit ----------
+  // ---------- Build Prefill Pairs & Preview ----------
+  function buildLabelValuePairs(rowBySource){
+    const pairs = [];
+    questions.forEach(q => {
+      const m = mapping[q.qid];
+      if (!m) return;
+
+      let val = '';
+      if (m.kind === 'sheet') {
+        const r = rowBySource[m.sourceId];
+        if (!r) return;
+        val = r[m.column] ?? '';
+      } else if (m.kind === 'choice') {
+        val = m.value ?? '';
+        if (Array.isArray(val)) {
+          // For checkbox (multi), join with comma (Jotform accepts comma-separated)
+          if (q.type === 'control_checkbox') val = val.join(', ');
+          else val = val.join(' ');
+        }
+      } else if (m.kind === 'other') {
+        val = m.otherValue ?? '';
+      }
+
+      if (String(val).trim().length === 0) return;
+      pairs.push({ label: q.label, value: val });
+    });
+    return pairs;
+  }
+
   function renderPreviews(){
     const rowBySource = {};
     if(selectedRow && selectedRow.__sourceId){
@@ -875,55 +612,42 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
     }
     if (rowPreview) rowPreview.textContent = selectedRow ? JSON.stringify(selectedRow, null, 2) : '(no row selected)';
 
-    // Build preview respecting choice normalization
     const preview = {};
-    Object.keys(mapping).forEach(qid=>{
-      const m = mapping[qid];
-      const r = rowBySource[m?.sourceId];
-      if(!r) return;
-      const q = questions.find(qq => qq.qid === qid);
-      const rawVal = r[m.column] ?? '';
-      const val = q ? normalizeChoiceValue(q, rawVal) : rawVal;
-      preview[`submission[${qid}]`] = val;
-    });
-    if (payloadPreview) payloadPreview.textContent = Object.keys(preview).length ? JSON.stringify(preview, null, 2) : '(no mapped values or no selected row)';
-  }
+    const pairs = buildLabelValuePairs(rowBySource);
+    pairs.forEach(p => { preview[p.label] = p.value; });
 
-  // Button loading helper
-  function setBusy(btn, busy=true){
-    if (!btn) return;
-    if (busy){
-      btn.disabled = true;
-      btn.dataset.label = btn.textContent;
-      btn.textContent = 'Submitting…';
-    } else {
-      btn.disabled = false;
-      if (btn.dataset.label) btn.textContent = btn.dataset.label;
-      delete btn.dataset.label;
+    if (payloadPreview) {
+      payloadPreview.textContent = Object.keys(preview).length
+        ? JSON.stringify(preview, null, 2)
+        : '(no mapped values or no selected row)';
     }
   }
 
+  // ---------- Prefill Live Form (reuses your Create button) ----------
   createSubmit && createSubmit.addEventListener('click', async ()=>{
+    const original = createSubmit.textContent;
+    createSubmit.disabled = true;
+    createSubmit.textContent = 'Filling…';
     try{
-      if(!selectedRow){ err('Pick a row first.'); return; }
-      if(!apiKey){ err('Authorize or paste API key first.'); return; }
-      if(!formId){ err('Form ID not available. Click “Save Form ID” or open from a form page.'); return; }
-
-      setBusy(createSubmit, true);
+      if(!selectedRow){ throw new Error('Pick a row first.'); }
       const rowBySource = { [selectedRow.__sourceId]: selectedRow };
-      const body = buildSubmissionBody(rowBySource);
-      const sid = await createSubmission(body);
-      const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
-      if (resultBox) resultBox.innerHTML = `<div class="ok" style="display:block">Created submission <b>${sid}</b>. <a href="${editUrl}" target="_top" rel="noopener">Open Edit Page</a></div>`;
-      try{ window.top.location.href = editUrl; }catch(_){}
+      const pairs = buildLabelValuePairs(rowBySource);
+      if (!pairs.length) throw new Error('No mapped values to fill.');
+
+      JFCustomWidget.hideWidgetError && JFCustomWidget.hideWidgetError();
+      // The magic: fill the live parent form by labels
+      JFCustomWidget.setFieldsValueByLabel(pairs);
+      showStatus('ok','Fields have been auto-filled.');
+      if (resultBox) resultBox.innerHTML = '';
     }catch(e){
-      err(e.message||'Failed to create submission.');
+      showStatus('err', e?.message || 'Prefill failed.');
     }finally{
-      setBusy(createSubmit, false);
+      createSubmit.disabled = false;
+      createSubmit.textContent = original;
     }
   });
 
-  // ---------- Widget value emitter ----------
+  // ---------- Widget value emitter (so config is stored with the form) ----------
   const emit = debounce(()=>{
     const payload = {
       formId,
@@ -936,6 +660,20 @@ createSubmit && createSubmit.addEventListener('click', async ()=>{
   }, 600);
   function emitWidgetValue(){ emit(); }
   window.addEventListener('storage', emitWidgetValue);
+
+  // ---------- Auto-resize (like Spreadsheet-to-Form) ----------
+  (function enableAutoResize(){
+    if (!('ResizeObserver' in window)) return;
+    let lastH = 0;
+    const ro = new ResizeObserver(() => {
+      const h = document.body.clientHeight + 10;
+      if (h !== lastH) {
+        lastH = h;
+        try { JFCustomWidget.requestFrameResize({ height: h }); } catch(_) {}
+      }
+    });
+    ro.observe(document.body);
+  })();
 
   // ---------- Kick things off ----------
   function boot(){

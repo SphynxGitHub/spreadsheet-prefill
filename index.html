@@ -112,29 +112,26 @@
     </div>
   </div>
 
-  <!-- Preview & Submit -->
-  <div class="card">
-    <h3>Preview & Submit</h3>
-    <div class="grid">
-      <div>
-        <div class="mini">Selected Row Preview (raw)</div>
-        <pre id="rowPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
-      </div>
-      <div>
-        <div class="mini">Submission Payload Preview</div>
-        <pre id="payloadPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
-      </div>
+<!-- Preview & Submit -->
+<div class="card">
+  <h3>Preview & Submit</h3>
+  <div class="grid">
+    <div>
+      <div class="mini">Selected Row Preview (raw)</div>
+      <pre id="rowPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
     </div>
-    <div class="flex-end">
-      <button id="createSubmit" class="btn primary">Create Submission & Open Edit</button>
+    <div>
+      <div class="mini">Submission Payload Preview</div>
+      <pre id="payloadPreview" style="max-height:200px;overflow:auto;background:#0b1021;color:#e3e8ff;border-radius:10px;padding:8px;font-size:12px;"></pre>
     </div>
-    <div id="resultBox"></div>
   </div>
-  <div class="card">
-    <h3>Debug</h3>
-  <div id="debugBox" style="max-height:220px; overflow:auto; border:1px solid #e6e6ea; border-radius:10px; padding:8px; background:#fff; font-size:12px;"></div>
-</div>
-
+  <div class="flex-end">
+    <!-- NEW: prefill-only button -->
+    <button id="prefillBtn" class="btn">Prefill Live Form</button>
+    <!-- keep for future; disabled for now -->
+    <button id="createSubmit" class="btn primary" disabled title="API submit is disabled; using live prefill instead.">Create Submission</button>
+  </div>
+  <div id="resultBox"></div>
 </div>
 
 <script src="app.js"></script>

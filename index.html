@@ -20,12 +20,14 @@
     .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-bottom:12px}
     h3{margin:0 0 8px 0;font-size:16px}
     .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
     input[type="text"], input[type="password"], select, textarea{
       border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fff;min-width:220px;font:inherit
     }
     textarea{width:100%;min-height:80px}
     .btn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
     .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .btn.ghost{background:transparent}
     .btn[disabled]{opacity:.6; cursor:not-allowed}
     .muted{color:var(--muted);font-size:12px}
     .ok{color:#065f46;background:#ecfdf5;border:1px solid #bbf7d0;padding:8px;border-radius:10px;margin:6px 0;display:none}
@@ -42,6 +44,12 @@
     .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);margin:2px;background:#f8fafc}
     .chip b{font-weight:600}
     .chip button{border:none;background:transparent;cursor:pointer;color:#ef4444}
+
+    /* collapse behavior */
+    #mappingCard.collapsed .mapping-body{ display:none; }
+    #mappingCard.collapsed .mapping-footer{ display:none; }
+    #mappingCard .summary{ display:none; font-size:12px; color:var(--muted); }
+    #mappingCard.collapsed .summary{ display:block; }
   </style>
 </head>
 <body>
@@ -93,17 +101,27 @@
   </div>
 
   <!-- Mapping -->
-  <div class="card">
-    <h3>Map Sheet Columns → Jotform Questions</h3>
-    <div class="mini">
-      Static headers/paragraphs/widgets are hidden. For Dropdown/Single/Multiple Choice you may map to a sheet column,
+  <div class="card" id="mappingCard">
+    <div class="topbar">
+      <h3 style="margin:0">Map Sheet Columns → Jotform Questions</h3>
+      <div>
+        <button id="toggleMap" class="btn ghost" title="Collapse/Expand mapping">Shrink</button>
+      </div>
+    </div>
+    <div class="summary" id="mapSummary">Mapping hidden.</div>
+
+    <div class="mini">Static headers/paragraphs/widgets are hidden. For Dropdown/Single/Multiple Choice you may map to a sheet column,
       pick an available choice, or select <i>Manual → Custom value…</i>.
     </div>
-    <table id="mapTable">
-      <thead><tr><th>Question (type)</th><th>QID</th><th>Sheet/Choice/Manual</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="row">
+
+    <div class="mapping-body">
+      <table id="mapTable">
+        <thead><tr><th>Question (type)</th><th>QID</th><th>Sheet/Choice/Manual</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="row mapping-footer">
       <button id="clearMap" class="btn">Clear Mapping</button>
       <button id="autoMap" class="btn">Auto-map by label match</button>
       <span class="muted">You can fine-tune after auto-mapping.</span>

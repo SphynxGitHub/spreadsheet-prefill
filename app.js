@@ -320,37 +320,148 @@
     }
   });
 
-  async function createSubmission(body){
-    if(!apiKey) throw new Error('Paste an API key or Login first.');
-    if(!formId) throw new Error('Form ID not available.');
-    const url = `${apiBase}/form/${formId}/submissions?apiKey=${encodeURIComponent(apiKey)}`;
-    const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
-    let text;
-    try { text = await resp.text(); } catch(_){}
-    if(!resp.ok){
-      // Try to surface API error content
-      let msg = `Create submission failed: ${resp.status}`;
-      if (text) {
-        try {
-          const j = JSON.parse(text);
-          if (j && (j.message || j.error || j.details)) {
-            msg += ` — ${j.message || j.error || j.details}`;
-          } else {
-            msg += ` — ${text.slice(0,300)}`;
-          }
-        } catch(_) {
-          msg += ` — ${text.slice(0,300)}`;
-        }
-      }
-      throw new Error(msg);
-    }
-    let json = {};
-    try { json = text ? JSON.parse(text) : {}; } catch(_){}
-    const c = json.content || {};
-    const sid = c.id || c.submissionID || c.sid || null;
-    if(!sid) throw new Error('Submission created but ID not found.');
-    return String(sid);
+// --- Tiny inline debug console ---
+function debug(msg, data){
+  const box = document.getElementById('debugBox');
+  if (!box) return;
+  const time = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.style.whiteSpace = 'pre-wrap';
+  line.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  line.textContent = `[${time}] ${msg}${data!==undefined ? ' — ' + (typeof data==='string' ? data : JSON.stringify(data, null, 2)) : ''}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+// --- Robust POST with timeout & helpful errors ---
+async function createSubmission(body){
+  if(!apiKey) throw new Error('Paste an API key or Login first.');
+  if(!formId) throw new Error('Form ID not available.');
+
+  const url = `${apiBase}/form/${formId}/submissions?apiKey=${encodeURIComponent(apiKey)}`;
+  debug('POST', { url, body:[...body.entries()].reduce((o,[k,v]) => (o[k]=v,o), {}) });
+
+  // Use AbortController for a real timeout (25s)
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), 25000);
+
+  let resp, text;
+  try{
+    resp = await fetch(url, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8' },
+      body,
+      mode:'cors',
+      signal: ctrl.signal
+    });
+    text = await resp.text();
+  }catch(e){
+    clearTimeout(t);
+    debug('Network error', String(e));
+    throw new Error('Network error (possible CORS/timeout).');
   }
+  clearTimeout(t);
+
+  // Try to parse JSON (Jotform API returns JSON)
+  let json;
+  try { json = JSON.parse(text); } catch(_){ /* not JSON */ }
+
+  debug('Response', json || text);
+
+  if (!resp.ok) {
+    // Surface API message if present
+    const apiMsg = json?.message || json?.error || text || `HTTP ${resp.status}`;
+    throw new Error(apiMsg);
+  }
+
+  // Jotform can send {success:false, message:"...", content:{...}}
+  if (json && json.success === false) {
+    const apiMsg = json.message || 'API returned success=false.';
+    throw new Error(apiMsg);
+  }
+
+  const c = json?.content || {};
+  const sid = c.id || c.submissionID || c.sid || null;
+  if(!sid) {
+    throw new Error('Submission created but ID not found in response.');
+  }
+  return String(sid);
+}
+
+// Build body now supports sheet/fixed/fixedMulti/text (unchanged from last patch)
+function buildSubmissionBody(rowBySource){
+  const data = new URLSearchParams();
+
+  let mappedCount = 0;
+  Object.keys(mapping).forEach(qid=>{
+    const m = mapping[qid]; if(!m) return;
+
+    if (m.kind === 'sheet') {
+      const r = rowBySource[m.sourceId]; if(!r) return;
+      data.append(`submission[${qid}]`, r[m.column] ?? '');
+      mappedCount++; return;
+    }
+    if (m.kind === 'fixed') {
+      data.append(`submission[${qid}]`, m.value ?? '');
+      mappedCount++; return;
+    }
+    if (m.kind === 'fixedMulti') {
+      const arr = Array.isArray(m.values) ? m.values : [];
+      data.append(`submission[${qid}]`, arr.join(', '));
+      mappedCount++; return;
+    }
+    if (m.kind === 'text') {
+      data.append(`submission[${qid}]`, m.value ?? '');
+      mappedCount++; return;
+    }
+  });
+
+  if (mappedCount === 0) {
+    // Jotform *usually* accepts an empty submission, but some setups won’t.
+    // Add a harmless “note” to ensure the POST carries something.
+    data.append('submission[note]', 'prefill');
+  }
+
+  return data;
+}
+
+// Click handler with bulletproof re-enable + error surfacing
+createSubmit && createSubmit.addEventListener('click', async ()=>{
+  if(!selectedRow){ err('Pick a row first.'); return; }
+
+  createSubmit.disabled = true;
+  const originalLabel = createSubmit.textContent;
+  createSubmit.textContent = 'Creating…';
+
+  try{
+    const rowBySource = { [selectedRow.__sourceId]: selectedRow };
+    const body = buildSubmissionBody(rowBySource);
+    const sid  = await createSubmission(body);
+    const editUrl = `https://www.jotform.com/edit/${encodeURIComponent(sid)}`;
+
+    if (resultBox) {
+      resultBox.innerHTML = `
+        <div class="ok" style="display:block">
+          Created submission <b>${sid}</b>.
+          <a href="${editUrl}" target="_blank" rel="noopener">Open Edit Page</a>
+        </div>`;
+    }
+
+    // Try best-effort open. Popup blockers sometimes block _blank from async.
+    // You’ll still have the clickable link above.
+    try { window.open(editUrl, '_blank', 'noopener'); } catch(_) {}
+    try { window.top.location.href = editUrl; } catch(_) {}
+
+    ok('Submission created.');
+  }catch(e){
+    err(e.message || 'Failed to create submission.');
+    debug('Error', e?.stack || String(e));
+  }finally{
+    createSubmit.disabled = false;
+    createSubmit.textContent = originalLabel;
+  }
+});
+
 
   // ---------- UI: Auth ----------
   JFCustomWidget.subscribe('ready', payload => {
